@@ -93,6 +93,27 @@ print("RIGHT:"); [print(f"  R{i:02d}: cx={cx:.1f} cy={cy:.1f}") for i,(cx,cy) in
 
 cos30 = math.cos(math.radians(30))
 
+# ---- Cavity pre-computation ------------------------------------------
+# Tiles whose bounding box overlaps the cavity footprint get the cut per-tile
+# (same pattern as pin/wire holes — guarantees boolean hits solid material).
+def overlaps_cavity(cx, cy):
+    return (cx + S*cos30 > CAVITY_X_OFFSET and
+            cx - S*cos30 < CAVITY_X_OFFSET + CAVITY_W and
+            cy + S        > -CAVITY_D / 2.0 and
+            cy - S        <  CAVITY_D / 2.0)
+
+_cav_corners = [(CAVITY_X_OFFSET,            -CAVITY_D/2.0),
+                (CAVITY_X_OFFSET + CAVITY_W,  -CAVITY_D/2.0),
+                (CAVITY_X_OFFSET,              CAVITY_D/2.0),
+                (CAVITY_X_OFFSET + CAVITY_W,   CAVITY_D/2.0)]
+_min_dome_cav  = min(dome_z(x, y) for x, y in _cav_corners)
+CAVITY_H_SAFE  = min(CAVITY_H, _min_dome_cav - 2.0)
+if CAVITY_H_SAFE < CAVITY_H:
+    print(f"⚠ CAVITY_H capped {CAVITY_H:.1f}→{CAVITY_H_SAFE:.1f}mm (dome clearance)")
+print(f"Cavity {CAVITY_W:.0f}×{CAVITY_D:.0f}×{CAVITY_H_SAFE:.1f}mm  "
+      f"x={CAVITY_X_OFFSET:.0f}..{CAVITY_X_OFFSET+CAVITY_W:.0f}  "
+      f"min overhead={_min_dome_cav + PLATE_H - CAVITY_H_SAFE:.1f}mm")
+
 # ---- Pin hole assignments per tile ----------------------------------
 # (tile_half, tile_idx, face_side, drill_dir)
 # face_side 'R' = right face of tile (cx + cos30*S)
@@ -277,6 +298,18 @@ def build_tile(tag, half_char, tile_idx, cx, cy):
     print(f"  {tag} wire: offset={CUP_R-WIRE_HOLE_RADIUS:.1f}mm -Y "
           f"{pre_w}→{post_w} {'✓' if ok_w and post_w>pre_w else '⚠ MISS'}")
 
+    # 3c. Teensy cavity — right half tiles that overlap the cavity footprint only
+    if half_char == 'R' and overlaps_cavity(cx, cy):
+        cav = make_box_cutter(f"Cavity_{tag}",
+                              CAVITY_X_OFFSET, -CAVITY_D/2.0, -2.0,
+                              CAVITY_W,         CAVITY_D,      CAVITY_H_SAFE + 2.0)
+        apply_transforms(cav)
+        pre_cv  = len(obj.data.polygons)
+        ok_cv   = do_diff(obj, cav)
+        post_cv = len(obj.data.polygons)
+        bpy.data.objects.remove(cav, do_unlink=True)
+        print(f"  {tag} cavity: {pre_cv}→{post_cv} {'✓' if ok_cv and post_cv>pre_cv else '⚠ MISS'}")
+
     # 4. Pin hole if this tile has one assigned
     key = (half_char, tile_idx)
     if key in PIN_ASSIGNMENTS:
@@ -339,34 +372,6 @@ for i,(cx,cy) in enumerate(right_grid):
 print("\nJoining...")
 left_obj  = join_and_clean(left_names,  "SensorBase_L")
 right_obj = join_and_clean(right_names, "SensorBase_R")
-
-# ---- Teensy 4.1 cavity (right half only) -----------------------------
-print("\nCutting Teensy cavity on SensorBase_R ...")
-# Safety: cavity ceiling must stay below dome surface at every footprint corner.
-# dome_z(x,y) is the bottom of the tile solid at that point (cup floors sit here).
-_ch = CAVITY_H
-_x0 = CAVITY_X_OFFSET
-_corners = [(_x0,           -CAVITY_D/2), (_x0 + CAVITY_W, -CAVITY_D/2),
-            (_x0,            CAVITY_D/2), (_x0 + CAVITY_W,  CAVITY_D/2)]
-_min_dome = min(dome_z(cx, cy) for cx,cy in _corners)
-_safe_h   = _min_dome - 2.0   # 2mm buffer below dome surface
-if _ch > _safe_h:
-    print(f"  ⚠ CAVITY_H capped {_ch:.1f}→{_safe_h:.1f}mm (dome clearance)")
-    _ch = _safe_h
-_min_overhead = _min_dome + PLATE_H - _ch
-print(f"  Cavity {CAVITY_W}×{CAVITY_D}×{_ch:.1f}mm  x={_x0:.0f}..{_x0+CAVITY_W:.0f}  min overhead={_min_overhead:.1f}mm")
-
-if right_obj:
-    # Overrun at y and z edges for clean boolean faces; left wall is clean at CAVITY_X_OFFSET
-    cav = make_box_cutter("Cavity_Teensy",
-                          _x0,           -CAVITY_D/2 - 2.0, -2.0,
-                          CAVITY_W + 2.0, CAVITY_D   + 4.0,  _ch + 2.0)
-    apply_transforms(cav)
-    pre_c  = len(right_obj.data.polygons)
-    ok_c   = do_diff(right_obj, cav)
-    post_c = len(right_obj.data.polygons)
-    bpy.data.objects.remove(cav, do_unlink=True)
-    print(f"  {pre_c}→{post_c} {'✓' if ok_c and post_c>pre_c else '⚠ MISS'}")
 
 # ---- Finalise --------------------------------------------------------
 print("\nFinalising...")
