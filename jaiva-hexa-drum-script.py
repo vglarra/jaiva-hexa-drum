@@ -40,7 +40,7 @@ WIRE_HOLE_RADIUS = WIRE_HOLE_DIA / 2.0
 
 # Teensy 4.1 microcontroller cavity — cut from underside of right half
 # x: offset from seam to leave a solid wall; y: centred at dome peak (y=0)
-CAVITY_X_OFFSET = 6.0    # mm — wall thickness between seam and cavity left face
+CAVITY_X_OFFSET = 9.0    # mm — wall thickness between seam and cavity left face
 CAVITY_W = 50.0   # mm — X, perpendicular to split seam, into right half
 CAVITY_D = 90.0   # mm — Y, parallel to split seam, centred at y=0
 CAVITY_H = 30.0   # mm — Z, from back face (z=0) upward into dome body
