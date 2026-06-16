@@ -1,8 +1,9 @@
 # ============================================================
-# Blender Script: Hex Dome Array V52
+# Blender Script: Hex Dome Array V53
 # ALL 4 pairs cut per-tile BEFORE joining.
 # PIN_Z = 20mm for all pairs — inside dome body.
 # Per-tile cutting guarantees boolean always hits solid material.
+# Wire hole (5mm dia) cut per-tile, tangent to cup inner wall (-Y).
 # ============================================================
 
 import bpy
@@ -11,7 +12,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V52 - ALL HOLES PER-TILE ===")
+print("=== HEX DOME ARRAY V53 - ALL HOLES + WIRE HOLES PER-TILE ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -32,6 +33,9 @@ PIN_RADIUS     = PIN_DIAMETER / 2.0
 PIN_DEPTH      = 20.0
 PIN_CLEARANCE  = 0.2
 PIN_Z          = 20.0   # mm — inside dome body
+
+WIRE_HOLE_DIA    = 5.0
+WIRE_HOLE_RADIUS = WIRE_HOLE_DIA / 2.0
 
 blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
@@ -116,7 +120,7 @@ for (half, idx),(fside, dirn, lbl) in PIN_ASSIGNMENTS.items():
 
 # ---- Cleanup ---------------------------------------------------------
 for obj in list(bpy.data.objects):
-    if obj.name.startswith(("Hex_","Cut_","SensorBase","Hole_","TileNum_")):
+    if obj.name.startswith(("Hex_","Cut_","SensorBase","Hole_","Wire_","TileNum_")):
         bpy.data.objects.remove(obj, do_unlink=True)
 
 HEX_ANGLES=[math.radians(30+60*i) for i in range(6)]
@@ -176,6 +180,31 @@ def make_hole_cutter(name, face_x, hole_y, hole_z, direction, depth, radius):
     obj.location = Vector((centre_x, hole_y, hole_z))
     return obj
 
+def make_wire_hole_cutter(name, cx, cy):
+    """Vertical cylinder (Z-axis) for sensor wiring from cup to z=0 back face.
+    Offset = CUP_R - WIRE_HOLE_RADIUS so hole edge is tangent to cup inner wall."""
+    dz     = dome_z(cx, cy)
+    bottom = -2.0
+    top    = dz + PLATE_H + 2.0
+    height = top - bottom
+    center_z = (top + bottom) / 2.0
+    # Tangent position: hole outer edge just touches cup wall at -Y
+    offset = CUP_R - WIRE_HOLE_RADIUS
+    mesh = bpy.data.meshes.new(name + "_mesh")
+    obj  = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bm = bmesh.new(); segs = 32; half = height / 2.0; bv, tv = [], []
+    for i in range(segs):
+        a = 2 * math.pi * i / segs
+        xo = WIRE_HOLE_RADIUS * math.cos(a); yo = WIRE_HOLE_RADIUS * math.sin(a)
+        bv.append(bm.verts.new((xo, yo, -half))); tv.append(bm.verts.new((xo, yo, half)))
+    for i in range(segs):
+        j = (i + 1) % segs; bm.faces.new([bv[i], bv[j], tv[j], tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    obj.location = Vector((cx, cy - offset, center_z))
+    return obj
+
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
@@ -213,6 +242,16 @@ def build_tile(tag, half_char, tile_idx, cx, cy):
     for v in obj.data.vertices:
         if v.co.z<0.01: v.co.z=0.0
     obj.data.update()
+
+    # 3b. Wire hole — 5mm vertical passage from cup floor to z=0 back face
+    wire = make_wire_hole_cutter(f"Wire_{tag}", cx, cy)
+    apply_transforms(wire)
+    pre_w = len(obj.data.polygons)
+    ok_w  = do_diff(obj, wire)
+    post_w= len(obj.data.polygons)
+    bpy.data.objects.remove(wire, do_unlink=True)
+    print(f"  {tag} wire: offset={CUP_R-WIRE_HOLE_RADIUS:.1f}mm -Y "
+          f"{pre_w}→{post_w} {'✓' if ok_w and post_w>pre_w else '⚠ MISS'}")
 
     # 4. Pin hole if this tile has one assigned
     key = (half_char, tile_idx)
@@ -300,8 +339,8 @@ for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
     if obj is None: continue
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
-    stl=os.path.join(export_dir,f"hex_dome_v52_{suffix}.stl")
-    objf=os.path.join(export_dir,f"hex_dome_v52_{suffix}.obj")
+    stl=os.path.join(export_dir,f"hex_dome_v53_{suffix}.stl")
+    objf=os.path.join(export_dir,f"hex_dome_v53_{suffix}.obj")
     exported=False
     for fn,kw in [
         (bpy.ops.wm.stl_export,   {"filepath":stl,"export_selected_objects":True}),
