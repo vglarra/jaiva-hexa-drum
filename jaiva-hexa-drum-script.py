@@ -1,9 +1,10 @@
 # ============================================================
-# Blender Script: Hex Dome Array V53
+# Blender Script: Hex Dome Array V54
 # ALL 4 pairs cut per-tile BEFORE joining.
 # PIN_Z = 20mm for all pairs — inside dome body.
 # Per-tile cutting guarantees boolean always hits solid material.
 # Wire hole (5mm dia) cut per-tile, tangent to cup inner wall (-Y).
+# Teensy 4.1 cavity (50x90x30mm) cut on right half after joining.
 # ============================================================
 
 import bpy
@@ -12,7 +13,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V53 - ALL HOLES + WIRE HOLES PER-TILE ===")
+print("=== HEX DOME ARRAY V54 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -36,6 +37,13 @@ PIN_Z          = 20.0   # mm — inside dome body
 
 WIRE_HOLE_DIA    = 5.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIA / 2.0
+
+# Teensy 4.1 microcontroller cavity — cut from underside of right half
+# x: offset from seam to leave a solid wall; y: centred at dome peak (y=0)
+CAVITY_X_OFFSET = 6.0    # mm — wall thickness between seam and cavity left face
+CAVITY_W = 50.0   # mm — X, perpendicular to split seam, into right half
+CAVITY_D = 90.0   # mm — Y, parallel to split seam, centred at y=0
+CAVITY_H = 30.0   # mm — Z, from back face (z=0) upward into dome body
 
 blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
@@ -120,7 +128,7 @@ for (half, idx),(fside, dirn, lbl) in PIN_ASSIGNMENTS.items():
 
 # ---- Cleanup ---------------------------------------------------------
 for obj in list(bpy.data.objects):
-    if obj.name.startswith(("Hex_","Cut_","SensorBase","Hole_","Wire_","TileNum_")):
+    if obj.name.startswith(("Hex_","Cut_","SensorBase","Hole_","Wire_","Cavity_","TileNum_")):
         bpy.data.objects.remove(obj, do_unlink=True)
 
 HEX_ANGLES=[math.radians(30+60*i) for i in range(6)]
@@ -203,6 +211,22 @@ def make_wire_hole_cutter(name, cx, cy):
     bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
     bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
     obj.location = Vector((cx, cy - offset, center_z))
+    return obj
+
+def make_box_cutter(name, x0, y0, z0, w, d, h):
+    """Axis-aligned rectangular box boolean cutter."""
+    x1,y1,z1 = x0+w, y0+d, z0+h
+    mesh = bpy.data.meshes.new(name+"_mesh")
+    obj  = bpy.data.objects.new(name, mesh)
+    bpy.context.collection.objects.link(obj)
+    bm = bmesh.new()
+    coords=[(x0,y0,z0),(x1,y0,z0),(x1,y1,z0),(x0,y1,z0),
+            (x0,y0,z1),(x1,y0,z1),(x1,y1,z1),(x0,y1,z1)]
+    for c in coords: bm.verts.new(c)
+    bm.verts.ensure_lookup_table()
+    for fi in [[0,3,2,1],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]]:
+        bm.faces.new([bm.verts[i] for i in fi])
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
     return obj
 
 def apply_transforms(obj):
@@ -316,6 +340,34 @@ print("\nJoining...")
 left_obj  = join_and_clean(left_names,  "SensorBase_L")
 right_obj = join_and_clean(right_names, "SensorBase_R")
 
+# ---- Teensy 4.1 cavity (right half only) -----------------------------
+print("\nCutting Teensy cavity on SensorBase_R ...")
+# Safety: cavity ceiling must stay below dome surface at every footprint corner.
+# dome_z(x,y) is the bottom of the tile solid at that point (cup floors sit here).
+_ch = CAVITY_H
+_x0 = CAVITY_X_OFFSET
+_corners = [(_x0,           -CAVITY_D/2), (_x0 + CAVITY_W, -CAVITY_D/2),
+            (_x0,            CAVITY_D/2), (_x0 + CAVITY_W,  CAVITY_D/2)]
+_min_dome = min(dome_z(cx, cy) for cx,cy in _corners)
+_safe_h   = _min_dome - 2.0   # 2mm buffer below dome surface
+if _ch > _safe_h:
+    print(f"  ⚠ CAVITY_H capped {_ch:.1f}→{_safe_h:.1f}mm (dome clearance)")
+    _ch = _safe_h
+_min_overhead = _min_dome + PLATE_H - _ch
+print(f"  Cavity {CAVITY_W}×{CAVITY_D}×{_ch:.1f}mm  x={_x0:.0f}..{_x0+CAVITY_W:.0f}  min overhead={_min_overhead:.1f}mm")
+
+if right_obj:
+    # Overrun at y and z edges for clean boolean faces; left wall is clean at CAVITY_X_OFFSET
+    cav = make_box_cutter("Cavity_Teensy",
+                          _x0,           -CAVITY_D/2 - 2.0, -2.0,
+                          CAVITY_W + 2.0, CAVITY_D   + 4.0,  _ch + 2.0)
+    apply_transforms(cav)
+    pre_c  = len(right_obj.data.polygons)
+    ok_c   = do_diff(right_obj, cav)
+    post_c = len(right_obj.data.polygons)
+    bpy.data.objects.remove(cav, do_unlink=True)
+    print(f"  {pre_c}→{post_c} {'✓' if ok_c and post_c>pre_c else '⚠ MISS'}")
+
 # ---- Finalise --------------------------------------------------------
 print("\nFinalising...")
 for obj in [left_obj,right_obj]:
@@ -339,8 +391,8 @@ for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
     if obj is None: continue
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
-    stl=os.path.join(export_dir,f"hex_dome_v53_{suffix}.stl")
-    objf=os.path.join(export_dir,f"hex_dome_v53_{suffix}.obj")
+    stl=os.path.join(export_dir,f"hex_dome_v54_{suffix}.stl")
+    objf=os.path.join(export_dir,f"hex_dome_v54_{suffix}.obj")
     exported=False
     for fn,kw in [
         (bpy.ops.wm.stl_export,   {"filepath":stl,"export_selected_objects":True}),
