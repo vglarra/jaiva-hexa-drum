@@ -38,6 +38,9 @@ PIN_Z          = 20.0   # mm — inside dome body
 WIRE_HOLE_DIA    = 5.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIA / 2.0
 
+CANAL_WIDTH = 10.0   # mm — width of wiring canal
+CANAL_DEPTH =  5.0   # mm — depth of wiring canal from z=0 into tile body
+
 # Teensy 4.1 microcontroller cavity — cut from underside of right half
 # x: offset from seam to leave a solid wall; y: centred at dome peak (y=0)
 CAVITY_X_OFFSET = 9.0    # mm — wall thickness between seam and cavity left face
@@ -114,6 +117,45 @@ print(f"Cavity {CAVITY_W:.0f}×{CAVITY_D:.0f}×{CAVITY_H_SAFE:.1f}mm  "
       f"x={CAVITY_X_OFFSET:.0f}..{CAVITY_X_OFFSET+CAVITY_W:.0f}  "
       f"min overhead={_min_dome_cav + PLATE_H - CAVITY_H_SAFE:.1f}mm")
 
+# ---- Canal routing pre-computation ----------------------------------
+# 12 axis-aligned segments connecting ALL 16 sensor wire holes to the
+# Teensy cavity.  Applied per-tile before join (both halves).
+_wo = CUP_R - WIRE_HOLE_RADIUS   # 32 mm — wire hole offset (-Y from tile centre)
+
+CANAL_SEGMENTS = [
+    # ── Middle trunk (spans seam — connects left L02/L03 AND right R02 to cavity) ──
+    (-2.0*H,                     y2-_wo,  CAVITY_X_OFFSET,              y2-_wo),
+    (CAVITY_X_OFFSET + CAVITY_W, y2-_wo,  2.0*H,                        y2-_wo),
+
+    # ── Combined lower trunk (both halves at y = y1-32) ──
+    (-1.5*H,  y1-_wo,   1.5*H,  y1-_wo),
+
+    # ── Right half ──
+    (0.5*H,   y3-_wo,   1.5*H,  y3-_wo),           # top trunk R00 ↔ R01
+    (0.5*H,   CAVITY_D/2.0, 0.5*H, y3-_wo),        # top trunk → cavity top
+    (0.5*H,   y1-_wo,   0.5*H, -CAVITY_D/2.0),      # lower trunk → cavity bottom
+    (0.0,     y0-_wo,   0.0,  y1-_wo),              # R07 rises to lower trunk
+    (H,       y0-_wo,   H,    y1-_wo),              # R08 rises to lower trunk
+
+    # ── Left half ──
+    (-1.5*H,  y3-_wo,  -0.5*H,  y3-_wo),            # top trunk L00 ↔ L01
+    (-0.5*H,  y3-_wo,  -0.5*H,  y2-_wo),            # top trunk → middle trunk
+    (-0.5*H,  y1-_wo,  -0.5*H,  y2-_wo),            # lower trunk → middle trunk
+    (-H,      y0-_wo,  -H,      y1-_wo),             # L06 rises to lower trunk
+]
+
+def overlaps_canal(cx, cy, sx0, sy0, sx1, sy1):
+    """Bounding-box overlap between a tile and a canal segment."""
+    w2 = CANAL_WIDTH / 2.0 + 2.0
+    if abs(sy0 - sy1) < 0.01:   # horizontal
+        bx0, bx1 = min(sx0,sx1) - 2.0, max(sx0,sx1) + 2.0
+        by0, by1 = sy0 - w2, sy0 + w2
+    else:                        # vertical
+        bx0, bx1 = sx0 - w2, sx0 + w2
+        by0, by1 = min(sy0,sy1) - 2.0, max(sy0,sy1) + 2.0
+    return (cx+S*cos30 > bx0 and cx-S*cos30 < bx1 and
+            cy+S > by0 and cy-S < by1)
+
 # ---- Pin hole assignments per tile ----------------------------------
 # (tile_half, tile_idx, face_side, drill_dir)
 # face_side 'R' = right face of tile (cx + cos30*S)
@@ -149,7 +191,7 @@ for (half, idx),(fside, dirn, lbl) in PIN_ASSIGNMENTS.items():
 
 # ---- Cleanup ---------------------------------------------------------
 for obj in list(bpy.data.objects):
-    if obj.name.startswith(("Hex_","Cut_","SensorBase","Hole_","Wire_","Cavity_","TileNum_")):
+    if obj.name.startswith(("Hex_","Cut_","SensorBase","Hole_","Wire_","Cavity_","Canal_","TileNum_")):
         bpy.data.objects.remove(obj, do_unlink=True)
 
 HEX_ANGLES=[math.radians(30+60*i) for i in range(6)]
@@ -250,6 +292,17 @@ def make_box_cutter(name, x0, y0, z0, w, d, h):
     bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
     return obj
 
+def make_canal_cutter(name, x0, y0, x1, y1):
+    """Axis-aligned rectangular canal, CANAL_WIDTH wide × CANAL_DEPTH deep."""
+    w2 = CANAL_WIDTH / 2.0; ov = 1.0
+    if abs(y0 - y1) < 0.01:   # horizontal
+        bx0,bx1 = min(x0,x1)-ov, max(x0,x1)+ov
+        by0,by1 = y0-w2, y0+w2
+    else:                      # vertical
+        bx0,bx1 = x0-w2, x0+w2
+        by0,by1 = min(y0,y1)-ov, max(y0,y1)+ov
+    return make_box_cutter(name, bx0, by0, -1.0, bx1-bx0, by1-by0, CANAL_DEPTH+2.0)
+
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
@@ -309,6 +362,15 @@ def build_tile(tag, half_char, tile_idx, cx, cy):
         post_cv = len(obj.data.polygons)
         bpy.data.objects.remove(cav, do_unlink=True)
         print(f"  {tag} cavity: {pre_cv}→{post_cv} {'✓' if ok_cv and post_cv>pre_cv else '⚠ MISS'}")
+
+    # 3d. Wiring canals — all tiles, per overlapping segment
+    for si, (sx0, sy0, sx1, sy1) in enumerate(CANAL_SEGMENTS):
+        if overlaps_canal(cx, cy, sx0, sy0, sx1, sy1):
+            canal = make_canal_cutter(f"Canal_{tag}_{si}", sx0, sy0, sx1, sy1)
+            apply_transforms(canal)
+            do_diff(obj, canal)
+            bpy.data.objects.remove(canal, do_unlink=True)
+            print(f"  {tag} canal[{si}] ✓")
 
     # 4. Pin hole if this tile has one assigned
     key = (half_char, tile_idx)
