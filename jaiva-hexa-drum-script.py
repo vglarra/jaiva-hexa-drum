@@ -1,5 +1,5 @@
 # ============================================================
-# Blender Script: Hex Dome Array V55
+# Blender Script: Hex Dome Array V56
 # ALL 4 pairs cut per-tile BEFORE joining.
 # PIN_Z = 20mm for all pairs — inside dome body.
 # Per-tile cutting guarantees boolean always hits solid material.
@@ -13,7 +13,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V55 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
+print("=== HEX DOME ARRAY V56 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -416,6 +416,16 @@ def add_tile_label(label, cx, cy):
     txt.data.align_x='CENTER'; txt.data.align_y='CENTER'
     return txt
 
+def add_bottom_label(label, cx, cy):
+    """Same label on the flat back face (z=0), readable from below (-Z view)."""
+    bpy.ops.object.text_add(location=(cx, cy, -1.0))
+    txt=bpy.context.active_object
+    txt.name=f"TileNum_B_{label}"
+    txt.data.body=label; txt.data.size=8.0
+    txt.data.align_x='CENTER'; txt.data.align_y='CENTER'
+    txt.rotation_euler=(math.pi, 0, 0)
+    return txt
+
 # ---- Build all tiles -------------------------------------------------
 print("\nBuilding tiles (pin holes cut per-tile)...")
 left_names=[]; right_names=[]
@@ -423,12 +433,12 @@ left_names=[]; right_names=[]
 for i,(cx,cy) in enumerate(left_grid):
     tag=f"L{i:02d}"
     obj=build_tile(tag,'L',i,cx,cy)
-    left_names.append(obj.name); add_tile_label(tag,cx,cy)
+    left_names.append(obj.name); add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
 
 for i,(cx,cy) in enumerate(right_grid):
     tag=f"R{i:02d}"
     obj=build_tile(tag,'R',i,cx,cy)
-    right_names.append(obj.name); add_tile_label(tag,cx,cy)
+    right_names.append(obj.name); add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
 
 # ---- Join ------------------------------------------------------------
 print("\nJoining...")
@@ -458,8 +468,8 @@ for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
     if obj is None: continue
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
-    stl=os.path.join(export_dir,f"hex_dome_v55_{suffix}.stl")
-    objf=os.path.join(export_dir,f"hex_dome_v55_{suffix}.obj")
+    stl=os.path.join(export_dir,f"hex_dome_v56_{suffix}.stl")
+    objf=os.path.join(export_dir,f"hex_dome_v56_{suffix}.obj")
     exported=False
     for fn,kw in [
         (bpy.ops.wm.stl_export,   {"filepath":stl,"export_selected_objects":True}),
