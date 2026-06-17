@@ -1,5 +1,5 @@
 # ============================================================
-# Blender Script: Hex Dome Array V54
+# Blender Script: Hex Dome Array V55
 # ALL 4 pairs cut per-tile BEFORE joining.
 # PIN_Z = 20mm for all pairs — inside dome body.
 # Per-tile cutting guarantees boolean always hits solid material.
@@ -13,7 +13,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V54 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
+print("=== HEX DOME ARRAY V55 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -139,8 +139,8 @@ CANAL_SEGMENTS = [
 
     # ── Left half ──
     (-1.5*H,  y3-_wo,  -0.5*H,  y3-_wo),            # top trunk L00 ↔ L01
-    (-0.5*H,  y3-_wo,  -0.5*H,  y2-_wo),            # top trunk → middle trunk
-    (-0.5*H,  y1-_wo,  -0.5*H,  y2-_wo),            # lower trunk → middle trunk
+    (-H,      y3-_wo,  -H,      y2-_wo),             # top trunk → middle trunk at x=-H (away from seam)
+    (-H,      y1-_wo,  -H,      y2-_wo),             # lower trunk → middle trunk at x=-H (away from seam)
     (-H,      y0-_wo,  -H,      y1-_wo),             # L06 rises to lower trunk
 ]
 
@@ -458,8 +458,8 @@ for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
     if obj is None: continue
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
-    stl=os.path.join(export_dir,f"hex_dome_v54_{suffix}.stl")
-    objf=os.path.join(export_dir,f"hex_dome_v54_{suffix}.obj")
+    stl=os.path.join(export_dir,f"hex_dome_v55_{suffix}.stl")
+    objf=os.path.join(export_dir,f"hex_dome_v55_{suffix}.obj")
     exported=False
     for fn,kw in [
         (bpy.ops.wm.stl_export,   {"filepath":stl,"export_selected_objects":True}),
