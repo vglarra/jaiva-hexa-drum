@@ -1,5 +1,5 @@
 # ============================================================
-# Blender Script: Hex Dome Array V56
+# Blender Script: Hex Dome Array V65
 # ALL 4 pairs cut per-tile BEFORE joining.
 # PIN_Z = 20mm for all pairs — inside dome body.
 # Per-tile cutting guarantees boolean always hits solid material.
@@ -13,7 +13,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V56 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
+print("=== HEX DOME ARRAY V65 - ALL HOLES + WIRE HOLES + TEENSY CAVITY ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -39,7 +39,7 @@ WIRE_HOLE_DIA    = 5.0
 WIRE_HOLE_RADIUS = WIRE_HOLE_DIA / 2.0
 
 CANAL_WIDTH = 10.0   # mm — width of wiring canal
-CANAL_DEPTH =  5.0   # mm — depth of wiring canal from z=0 into tile body
+CANAL_DEPTH =  3.0   # mm — groove depth (leaves 3mm solid roof in 6mm plate)
 
 # Teensy 4.1 microcontroller cavity — cut from underside of right half
 # x: offset from seam to leave a solid wall; y: centred at dome peak (y=0)
@@ -301,7 +301,7 @@ def make_canal_cutter(name, x0, y0, x1, y1):
     else:                      # vertical
         bx0,bx1 = x0-w2, x0+w2
         by0,by1 = min(y0,y1)-ov, max(y0,y1)+ov
-    return make_box_cutter(name, bx0, by0, -1.0, bx1-bx0, by1-by0, CANAL_DEPTH+2.0)
+    return make_box_cutter(name, bx0, by0, -0.1, bx1-bx0, by1-by0, CANAL_DEPTH+0.1)
 
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
@@ -468,8 +468,8 @@ for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
     if obj is None: continue
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
-    stl=os.path.join(export_dir,f"hex_dome_v56_{suffix}.stl")
-    objf=os.path.join(export_dir,f"hex_dome_v56_{suffix}.obj")
+    stl=os.path.join(export_dir,f"hex_dome_v1_{suffix}.stl")
+    objf=os.path.join(export_dir,f"hex_dome_v1_{suffix}.obj")
     exported=False
     for fn,kw in [
         (bpy.ops.wm.stl_export,   {"filepath":stl,"export_selected_objects":True}),
