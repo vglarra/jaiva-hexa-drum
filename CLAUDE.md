@@ -21,7 +21,7 @@ A parametric hexagonal drum pad modeled in Blender via a Python script. The outp
 
 The script clears previous geometry, rebuilds everything, and exports STL/OBJ files next to the `.blend` file.
 
-## Current version: V65
+## Current version: V79
 
 Script versioning is tracked in the header comment and `print()` statement at the top of the script. Bump the version number (`V53` → `V54` etc.) whenever a meaningful geometry change is made.
 
