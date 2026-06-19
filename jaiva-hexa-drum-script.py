@@ -1,19 +1,22 @@
 # ============================================================
-# Blender Script: Hex Dome Array V85
+# Blender Script: Hex Dome Array V89
 # (v82: honest do_diff() reporting + R07 seam bias)
 # (v83: stronger end-of-build cleanup pass)
-# (v84: per-cut manifold tracking — pinpointed L01 Pair1 pin and L06
-#  Pair4 pin as the exact source of all 132 non-manifold edges, +66
-#  each. L03/L05 pins were clean, all cups/wires/canals were clean.)
-# NEW in v85: "try before you commit." Each cut is first attempted on
-# a disposable COPY of the target. If that leaves non-manifold/
-# degenerate geometry, the other solver is tried on a fresh copy, and
-# whichever result is actually clean is the one that gets kept. This
-# is more robust than picking EXACT vs FLOAT upfront per feature type,
-# because — as L01/L06 showed — a solver can report success while
-# still leaving real damage at one specific spot for reasons that
-# aren't predictable from tile position alone (near-coincident
-# geometry between the cutter and the dome's triangulated mesh).
+# (v84: per-cut manifold tracking — pinpointed L01/L06 pins)
+# (v85: try-before-commit safe_cut — confirmed clean, 0 failures)
+# (v86: per-pair PIN_Z override for Pair4 — L06/R07 pin lowered 5mm)
+# (v87: real bottom-face tile engraving, but with a Z-position bug)
+# (v88: fixed Z-position; L03/L06/R07/R08 -10mm, R05 +25mm)
+# NEW in v89: per direct visual confirmation — L03/L06/R07/R08 pushed
+# another 10mm further (-20mm total), R05 another 15mm further
+# (+40mm total), font size +10% (8.0 -> 8.8mm).
+# CAUTION: at +40mm, R05's label center sits right at ~78.5mm — R05's
+# own flat edge at this y-band is at x≈77mm (cx + cos30*S), so the
+# label center is now just past the tile's own boundary into open
+# air past the wall. It may print fine if the glyphs themselves still
+# fit mostly inside, but it's worth a direct look at the bottom face
+# before committing to a print — nudge back toward +35 if it's
+# clipping the edge.
 # ============================================================
 
 import bpy
@@ -22,7 +25,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V85 - TRY-BEFORE-COMMIT SAFE CUTS ===")
+print("=== HEX DOME ARRAY V89 - OFFSET REFINEMENT + FONT SIZE +10% ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -54,6 +57,17 @@ CAVITY_X_OFFSET = 9.0
 CAVITY_W = 50.0
 CAVITY_D = 90.0
 CAVITY_H = 30.0
+
+# v87: real (printable) tile numbers engraved into the bottom face,
+# replacing the old floating/unprinted text reference. Cut as a
+# shallow recess so it actually shows up on the part, not just in
+# the Blender viewport.
+ENGRAVE_DEPTH = 0.6   # mm recessed into the bottom face
+ENGRAVE_SIZE  = 8.8   # was 8.0, +10% per request
+MIRROR_BOTTOM_TEXT = False  # flip to True if the engraved numbers come
+                             # out mirrored when you look at the actual
+                             # bottom face (this is the one part worth
+                             # eyeballing in Blender before printing)
 
 blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
@@ -164,6 +178,33 @@ PIN_ASSIGNMENTS = {
     ('R', 5): ('L', +1, 'Pair3'),
     ('L', 6): ('R', -1, 'Pair4'),
     ('R', 7): ('L', +1, 'Pair4'),
+}
+
+# v86: per-pair Z override. A pin bridges two tiles, so both sides of a
+# pair must move together or the pin won't line up when glued — this
+# is keyed by pair label, not by individual tile, and applied to
+# whichever tile that label shows up on. Pair4 (L06↔R07) sits far
+# enough from the dome center that PIN_Z=20mm put the cutter high
+# enough to poke through the top surface — lowering it 5mm keeps it
+# fully inside the wall there. The other 3 pairs are unaffected.
+PIN_Z_OVERRIDES = {
+    'Pair4': PIN_Z - 5.0,   # 20.0 → 15.0mm
+}
+
+# v87: L03, L06, R07, R08 each have a canal trunk running straight
+# down their own center column (x = their cx exactly — that's not a
+# coincidence, the canal is routed there on purpose to feed the wire
+# hole above it). v88: R05 has the same issue (CANAL_SEGMENTS[4]/[5]
+# both sit at x=38.5mm — R05's own cx). Offsets below are per your
+# direct measurement, not my earlier guess. Every other tile is
+# unaffected and keeps its label dead-center.
+BOTTOM_LABEL_OFFSET = {
+    'L03': (-20.0, 0.0),
+    'L06': (-20.0, 0.0),
+    'R07': (-20.0, 0.0),
+    'R08': (-20.0, 0.0),
+    'R05': ( 40.0, 0.0),
+    'R02': (-10.0, 0.0),
 }
 
 # ---- Cleanup ---------------------------------------------------------
@@ -488,9 +529,10 @@ def apply_tile_cuts(solid_obj, tag, half_char, tile_idx, cx, cy):
         fside,dirn,lbl=PIN_ASSIGNMENTS[key]
         face_x=cx+cos30*S if fside=='R' else cx-cos30*S
         r=PIN_RADIUS+PIN_CLEARANCE
-        hole=make_hole_cutter(f"Hole_{tag}",face_x,cy,PIN_Z,dirn,PIN_DEPTH,r)
+        pin_z=PIN_Z_OVERRIDES.get(lbl, PIN_Z)   # v86: per-pair override
+        hole=make_hole_cutter(f"Hole_{tag}",face_x,cy,pin_z,dirn,PIN_DEPTH,r)
         apply_transforms(hole)
-        safe_cut(f"{tag} {lbl} pin", solid_obj, hole, primary='EXACT')
+        safe_cut(f"{tag} {lbl} pin (z={pin_z:.0f})", solid_obj, hole, primary='EXACT')
         bpy.data.objects.remove(hole,do_unlink=True)
 
 def apply_cavity(solid_obj):
@@ -513,12 +555,75 @@ def add_tile_label(label,cx,cy):
     return txt
 
 def add_bottom_label(label,cx,cy):
+    """Floating, UNPRINTED reference text in the Blender viewport only
+    (never exported — useful for quickly identifying a tile while
+    spinning the model around). See add_bottom_engraving() below for
+    the real, printable version."""
     bpy.ops.object.text_add(location=(cx,cy,-1.0))
     txt=bpy.context.active_object; txt.name=f"TileNum_B_{label}"
     txt.data.body=label; txt.data.size=8.0
     txt.data.align_x='CENTER'; txt.data.align_y='CENTER'
     txt.rotation_euler=(math.pi,0,0)
     return txt
+
+def make_text_cutter(label, cx, cy, depth=ENGRAVE_DEPTH, size=ENGRAVE_SIZE):
+    """v87: builds an actual solid cutter for the given text, used to
+    boolean-engrave it into the bottom (z=0) face. The cutter is built
+    flat at the origin, extruded into a real prism, then moved into
+    place — same general approach as every other cutter in this
+    script. It straddles z=0 by an extra 0.5mm on the outside so the
+    boolean never runs edge-on along an existing flat face (the same
+    lesson learned from the L01/L06 pin issue and the R07 seam fix)."""
+    bpy.ops.object.text_add(location=(0,0,0))
+    txt = bpy.context.active_object
+    txt.data.body = label
+    txt.data.size = size
+    txt.data.align_x = 'CENTER'; txt.data.align_y = 'CENTER'
+    if MIRROR_BOTTOM_TEXT:
+        txt.scale.x = -1.0
+    bpy.ops.object.select_all(action='DESELECT')
+    txt.select_set(True); bpy.context.view_layer.objects.active = txt
+    bpy.ops.object.convert(target='MESH')
+    mesh_obj = bpy.context.active_object
+
+    # Extrude the flat glyph mesh downward into a solid prism.
+    bm = bmesh.new()
+    bm.from_mesh(mesh_obj.data)
+    faces = bm.faces[:]
+    ret = bmesh.ops.extrude_face_region(bm, geom=faces)
+    new_verts = [v for v in ret['geom'] if isinstance(v, bmesh.types.BMVert)]
+    bmesh.ops.translate(bm, vec=(0,0,-(depth+0.5)), verts=new_verts)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.normal_update(); bm.to_mesh(mesh_obj.data); bm.free()
+    mesh_obj.data.update()
+
+    # v88 FIX: the cutter must straddle world z=0 (the bottom face) to
+    # actually carve the surface — not sit somewhere inside the solid.
+    # After the extrude above, local z spans [-(depth+0.5), 0]. The
+    # 180°-about-X rotation negates z, folding that to a rotated range
+    # of [0, depth+0.5] (always starting at 0, regardless of depth).
+    # Adding location.z = -0.5 shifts that to world z = [-0.5, depth]
+    # — 0.5mm poking harmlessly below the part, `depth` mm recessed up
+    # into the material. (v87 mistakenly used location.z = depth here,
+    # which shifted the whole cutter to world z = [depth, 2*depth+0.5]
+    # — entirely above the surface, carving an invisible, fully
+    # enclosed internal void instead of an actual surface recess.)
+    mesh_obj.rotation_euler = (math.pi, 0, 0)
+    mesh_obj.location = (cx, cy, -0.5)
+    bpy.ops.object.select_all(action='DESELECT')
+    mesh_obj.select_set(True); bpy.context.view_layer.objects.active = mesh_obj
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    return mesh_obj
+
+def add_bottom_engraving(solid_obj, tag, cx, cy):
+    """v87: the real, printable version of the bottom tile number —
+    boolean-subtracted into the actual mesh as a shallow recess, so it
+    shows up when sliced and printed. Tiles in BOTTOM_LABEL_OFFSET get
+    shifted sideways off their canal trunk first."""
+    ox, oy = BOTTOM_LABEL_OFFSET.get(tag, (0.0, 0.0))
+    cutter = make_text_cutter(tag, cx+ox, cy+oy)
+    safe_cut(f"{tag} bottom engrave", solid_obj, cutter, primary='FLOAT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
 
 # ============================================================
 # BUILD SEQUENCE
@@ -541,10 +646,12 @@ for i,(cx,cy) in enumerate(left_grid):
     tag=f"L{i:02d}"
     apply_tile_cuts(left_obj,tag,'L',i,cx,cy)
     add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
+    add_bottom_engraving(left_obj,tag,cx,cy)
 for i,(cx,cy) in enumerate(right_grid):
     tag=f"R{i:02d}"
     apply_tile_cuts(right_obj,tag,'R',i,cx,cy)
     add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
+    add_bottom_engraving(right_obj,tag,cx,cy)
 
 print("\nStep 4b: R07 vertical canal — post-dome FLOAT, biased off the seam...")
 apply_r07_canal_postdome(right_obj)
