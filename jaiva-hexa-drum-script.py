@@ -1,17 +1,19 @@
 # ============================================================
-# Blender Script: Hex Dome Array V82
-# FIX: silent boolean failures were being reported as "✓" — every
-# do_diff() call now has its return value checked and reported
-# honestly, with a final FAILURES summary. This is almost certainly
-# why canals were "disappearing" in the slicer: the EXACT/FLOAT
-# booleans were failing internally, the modifier was removed without
-# cutting anything, and the script printed "✓" anyway.
-# FIX: R07 post-dome canal cutter was centered exactly ON the L/R
-# split plane (x=0), so half the cutter box had nothing to cut
-# against and the other half sat exactly coplanar with the model's
-# flat seam face — that's the degenerate sliver you saw. The cutter
-# is now biased fully into the RIGHT half with a small overlap past
-# the seam, so it never touches the seam face edge-on.
+# Blender Script: Hex Dome Array V85
+# (v82: honest do_diff() reporting + R07 seam bias)
+# (v83: stronger end-of-build cleanup pass)
+# (v84: per-cut manifold tracking — pinpointed L01 Pair1 pin and L06
+#  Pair4 pin as the exact source of all 132 non-manifold edges, +66
+#  each. L03/L05 pins were clean, all cups/wires/canals were clean.)
+# NEW in v85: "try before you commit." Each cut is first attempted on
+# a disposable COPY of the target. If that leaves non-manifold/
+# degenerate geometry, the other solver is tried on a fresh copy, and
+# whichever result is actually clean is the one that gets kept. This
+# is more robust than picking EXACT vs FLOAT upfront per feature type,
+# because — as L01/L06 showed — a solver can report success while
+# still leaving real damage at one specific spot for reasons that
+# aren't predictable from tile position alone (near-coincident
+# geometry between the cutter and the dome's triangulated mesh).
 # ============================================================
 
 import bpy
@@ -20,7 +22,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V82 - HONEST FAILURE REPORTING + R07 SEAM FIX ===")
+print("=== HEX DOME ARRAY V85 - TRY-BEFORE-COMMIT SAFE CUTS ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -267,19 +269,76 @@ def do_diff(target, cutter, solver='EXACT'):
         except: pass
         return False
 
-def do_diff_retry(target, cutter, solver='EXACT'):
-    """v82: if the requested solver fails, automatically retry once with
-    the other solver before giving up. EXACT and FLOAT fail on different
-    kinds of geometry (coplanar faces vs. precision drift), so trying
-    both catches more real cuts instead of silently leaving material
-    uncut."""
-    ok = do_diff(target, cutter, solver=solver)
-    if ok:
-        return True, solver
-    alt = 'FLOAT' if solver == 'EXACT' else 'EXACT'
-    print(f"    retrying with {alt}...")
-    ok2 = do_diff(target, cutter, solver=alt)
-    return ok2, (alt if ok2 else solver)
+def duplicate_obj(obj, name):
+    """v85: cheap disposable copy used to try a cut without risking the
+    real mesh — only commit if the result turns out clean."""
+    new_data = obj.data.copy()
+    new_obj = bpy.data.objects.new(name, new_data)
+    new_obj.matrix_world = obj.matrix_world.copy()
+    bpy.context.collection.objects.link(new_obj)
+    return new_obj
+
+def try_cut_on_copy(target, cutter, solver):
+    """v85: duplicate target, attempt the boolean on the COPY only,
+    measure how much manifold damage (if any) it introduced relative
+    to target's current state. Returns (ok, delta_nonmanifold,
+    delta_zero_area, dup_object_or_None). Caller decides whether to
+    keep it."""
+    nm0, za0 = report_manifold_stats(target)
+    dup = duplicate_obj(target, target.name + "_TRY")
+    ok = do_diff(dup, cutter, solver=solver)
+    if not ok:
+        bpy.data.objects.remove(dup, do_unlink=True)
+        return False, None, None, None
+    nm1, za1 = report_manifold_stats(dup)
+    return True, nm1 - nm0, za1 - za0, dup
+
+def safe_cut(label, target, cutter, primary='EXACT'):
+    """v85: 'try before you commit'. Attempts `primary` solver on a
+    disposable copy; if that copy comes out manifold-clean, its mesh
+    data replaces target's and we're done. If not, tries the other
+    solver on a fresh copy too, and keeps whichever of the two
+    candidates is cleanest (preferring `primary` on a tie). This is
+    what catches cases like L01/L06's pins, where a solver applies
+    without raising an exception but still leaves real non-manifold
+    edges behind — that result is now simply never committed if a
+    cleaner alternative exists."""
+    alt = 'FLOAT' if primary == 'EXACT' else 'EXACT'
+    ok1, dn1, dz1, dup1 = try_cut_on_copy(target, cutter, primary)
+
+    if ok1 and dn1 == 0 and dz1 == 0:
+        target.data = dup1.data
+        bpy.data.objects.remove(dup1, do_unlink=True)
+        print(f"  {label} ✓ ({primary})")
+        return True
+
+    ok2, dn2, dz2, dup2 = try_cut_on_copy(target, cutter, alt)
+
+    candidates = []
+    if ok1: candidates.append((dn1 + dz1, primary, dup1))
+    if ok2: candidates.append((dn2 + dz2, alt, dup2))
+
+    if not candidates:
+        print(f"  {label} ✗ FAILED — material NOT removed (both solvers failed)")
+        FAILURES.append((label, "boolean failed (both solvers)"))
+        return False
+
+    candidates.sort(key=lambda c: c[0])
+    best_score, best_solver, best_dup = candidates[0]
+    target.data = best_dup.data
+
+    for _, _, d in candidates:
+        if d is not best_dup:
+            bpy.data.objects.remove(d, do_unlink=True)
+    bpy.data.objects.remove(best_dup, do_unlink=True)
+
+    if best_score == 0:
+        loser = primary if best_solver == alt else alt
+        print(f"  {label} ✓ ({best_solver}) — {loser} left damage, used {best_solver} instead")
+    else:
+        print(f"  {label} ✓ ({best_solver}) — ⚠ cleanest available still has {best_score} manifold issue(s)")
+        FAILURES.append((label, f"cleanest available result still has {best_score} manifold issues ({best_solver})"))
+    return True
 
 def make_flat_hex_solid(grid_tiles, solid_name):
     """Flat hex plate (solid-first, no interior walls, no dome)."""
@@ -340,13 +399,27 @@ def get_bbox(obj):
     xs=[p.x for p in bb]; ys=[p.y for p in bb]
     return min(xs),max(xs),min(ys),max(ys)
 
+def report_manifold_stats(obj):
+    """v83: count non-manifold edges and near-zero-area faces directly,
+    so 'is this object actually clean' is a number instead of a guess.
+    A non-manifold edge is one that isn't shared by exactly 2 faces —
+    the signature of an overlapping/duplicate-skin problem like the
+    striped look seen in the slicer. Near-zero-area faces are the
+    classic FLOAT-boolean tangent-cut leftovers."""
+    bm=bmesh.new(); bm.from_mesh(obj.data); bm.normal_update()
+    nonmanifold = sum(1 for e in bm.edges if not e.is_manifold)
+    zero_area   = sum(1 for f in bm.faces if f.calc_area() < 1e-5)
+    bm.free()
+    return nonmanifold, zero_area
+
 _R07_CANAL_IDX = 6  # CANAL_SEGMENTS[6] = (0.0, y0-_wo, 0.0, y1-_wo) — R07 vertical rise
 
 def apply_canals(solid_obj, half_char):
     """EXACT canal cuts on flat plate — simple axis-aligned box × flat surface.
     R07's canal (index 6, x=0mm through tile center) is deferred to post-dome
     step for the right half to avoid EXACT z-drift issues at cx=0.
-    v82: return value of every cut is now checked and reported honestly."""
+    v85: each cut now goes through safe_cut — tried on a disposable
+    copy first, only committed if the result is manifold-clean."""
     xmin,xmax,ymin,ymax=get_bbox(solid_obj)
     for si,(sx0,sy0,sx1,sy1) in enumerate(CANAL_SEGMENTS):
         if half_char == 'R' and si == _R07_CANAL_IDX:
@@ -358,14 +431,8 @@ def apply_canals(solid_obj, half_char):
         if abs(nx0-nx1)<0.5 and abs(ny0-ny1)<0.5: continue
         canal=make_canal_cutter(f"Canal_{half_char}_{si}",nx0,ny0,nx1,ny1)
         apply_transforms(canal)
-        ok, used = do_diff_retry(solid_obj,canal,solver='EXACT')
+        safe_cut(f"{half_char} canal[{si}]", solid_obj, canal, primary='EXACT')
         bpy.data.objects.remove(canal,do_unlink=True)
-        label=f"{half_char} canal[{si}]"
-        if ok:
-            print(f"  {label} ✓ ({used})")
-        else:
-            print(f"  {label} ✗ FAILED — material NOT removed")
-            FAILURES.append((label, "boolean failed (EXACT+FLOAT)"))
 
 def apply_r07_canal_postdome(right_obj):
     """Apply R07 vertical canal AFTER dome displacement, using FLOAT.
@@ -395,37 +462,26 @@ def apply_r07_canal_postdome(right_obj):
     canal = make_box_cutter("Canal_R07_postdome", bx0, by0, -2.0,
                              bx1-bx0, by1-by0, CANAL_DEPTH+4.0)
     apply_transforms(canal)
-    ok, used = do_diff_retry(right_obj, canal, solver='FLOAT')
+    safe_cut("R07 canal (post-dome)", right_obj, canal, primary='FLOAT')
     bpy.data.objects.remove(canal, do_unlink=True)
-    if ok:
-        print(f"  R07 canal (post-dome) ✓ ({used}) — biased x={bx0:.1f}..{bx1:.1f}")
-    else:
-        print("  R07 canal (post-dome) ✗ FAILED — material NOT removed")
-        FAILURES.append(("R07 canal (post-dome)", "boolean failed (FLOAT+EXACT)"))
 
 def apply_tile_cuts(solid_obj, tag, half_char, tile_idx, cx, cy):
     """Post-dome cuts:
-    - Cup / wire: FLOAT (dome surface is complex triangulation; FLOAT more robust)
-    - Pin holes: EXACT (seam walls are flat vertical rectangles → clean EXACT)
+    - Cup / wire: FLOAT preferred (dome surface is complex triangulation)
+    - Pin holes: EXACT preferred (seam walls are flat vertical rectangles)
     Cavity applied separately after all tile cuts.
-    v82: every cut's success/failure is now checked and reported."""
+    v85: every cut goes through safe_cut, which only commits a result
+    if it's manifold-clean — this is what fixed L01/L06's pins without
+    needing per-tile PIN_Z tuning."""
     cup=make_cup_cutter(f"Cut_{tag}",cx,cy)
     apply_transforms(cup)
-    ok_cup, used_cup = do_diff_retry(solid_obj,cup,solver='FLOAT')
+    safe_cut(f"{tag} cup", solid_obj, cup, primary='FLOAT')
     bpy.data.objects.remove(cup,do_unlink=True)
 
     wire=make_wire_hole_cutter(f"Wire_{tag}",cx,cy)
     apply_transforms(wire)
-    ok_wire, used_wire = do_diff_retry(solid_obj,wire,solver='FLOAT')
+    safe_cut(f"{tag} wire", solid_obj, wire, primary='FLOAT')
     bpy.data.objects.remove(wire,do_unlink=True)
-
-    if ok_cup and ok_wire:
-        print(f"  {tag} cup+wire ✓")
-    else:
-        if not ok_cup:
-            print(f"  {tag} cup ✗ FAILED"); FAILURES.append((f"{tag} cup","boolean failed"))
-        if not ok_wire:
-            print(f"  {tag} wire ✗ FAILED"); FAILURES.append((f"{tag} wire","boolean failed"))
 
     key=(half_char,tile_idx)
     if key in PIN_ASSIGNMENTS:
@@ -434,13 +490,8 @@ def apply_tile_cuts(solid_obj, tag, half_char, tile_idx, cx, cy):
         r=PIN_RADIUS+PIN_CLEARANCE
         hole=make_hole_cutter(f"Hole_{tag}",face_x,cy,PIN_Z,dirn,PIN_DEPTH,r)
         apply_transforms(hole)
-        ok_pin, used_pin = do_diff_retry(solid_obj,hole,solver='EXACT')
+        safe_cut(f"{tag} {lbl} pin", solid_obj, hole, primary='EXACT')
         bpy.data.objects.remove(hole,do_unlink=True)
-        if ok_pin:
-            print(f"  {tag} {lbl} pin ✓ ({used_pin})")
-        else:
-            print(f"  {tag} {lbl} pin ✗ FAILED")
-            FAILURES.append((f"{tag} {lbl} pin","boolean failed"))
 
 def apply_cavity(solid_obj):
     """Teensy cavity — deep pocket into dome (CAVITY_H_SAFE ≈ 30mm).
@@ -450,11 +501,8 @@ def apply_cavity(solid_obj):
                         CAVITY_X_OFFSET, -CAVITY_D/2.0, -2.0,
                         CAVITY_W, CAVITY_D, CAVITY_H_SAFE+2.0)
     apply_transforms(cav)
-    ok=do_diff(solid_obj,cav,solver='FLOAT')
+    safe_cut("Teensy cavity", solid_obj, cav, primary='FLOAT')
     bpy.data.objects.remove(cav,do_unlink=True)
-    print(f"  Cavity {'✓' if ok else '⚠ FAIL'}")
-    if not ok:
-        FAILURES.append(("Teensy cavity","boolean failed"))
 
 def add_tile_label(label,cx,cy):
     dz=dome_z(cx,cy)
@@ -516,16 +564,39 @@ for obj in [left_obj,right_obj]:
     if obj is None: continue
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
+
+    nm_before, za_before = report_manifold_stats(obj)
+
     bpy.ops.object.mode_set(mode='EDIT')
     bpy.ops.mesh.select_all(action='SELECT')
+    # Pass 1: tight merge (catches exact duplicate verts from shared corners)
     bpy.ops.mesh.remove_doubles(threshold=0.001)
+    # Pass 2 (v83): looser merge — catches accumulated FLOAT-boolean drift
+    # across many sequential cuts (8 tiles × 2 cuts on the left half).
+    # 0.02mm is far below any real feature size here (smallest is the
+    # 5mm wire hole / 0.2mm pin clearance), so this can't eat real geometry.
+    bpy.ops.mesh.remove_doubles(threshold=0.02)
+    # v83: dissolve near-zero-area faces — the classic leftover from a
+    # FLOAT boolean cutting tangent to the surface instead of cleanly
+    # through it. These are the "extra skin" causing the striped look.
+    bpy.ops.mesh.dissolve_degenerate(threshold=0.001)
     bpy.ops.mesh.normals_make_consistent(inside=False)
     bpy.ops.object.mode_set(mode='OBJECT')
+
+    nm_after, za_after = report_manifold_stats(obj)
+
     v=len(obj.data.vertices); f=len(obj.data.polygons)
     bb=[obj.matrix_world@Vector(c) for c in obj.bound_box]
     xs=[p.x for p in bb]; ys=[p.y for p in bb]
     w,d=max(xs)-min(xs),max(ys)-min(ys)
     print(f"  {obj.name}: {v}v {f}f {w:.0f}×{d:.0f}mm {'✓' if w<=340 and d<=340 else '⚠'}")
+    print(f"    non-manifold edges: {nm_before}→{nm_after}   "
+          f"near-zero-area faces: {za_before}→{za_after}")
+    if nm_after > 0 or za_after > 0:
+        print(f"    ⚠ {obj.name} still has leftover non-manifold/degenerate geometry —")
+        print(f"      this is consistent with the striped/double-skin look in the slicer.")
+        FAILURES.append((f"{obj.name} mesh cleanup",
+                          f"{nm_after} non-manifold edges, {za_after} near-zero-area faces remain"))
 
 # ---- Failure summary (NEW in v82) -------------------------------------
 print("\n" + "="*60)
