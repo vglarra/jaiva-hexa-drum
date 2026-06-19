@@ -1,22 +1,20 @@
 # ============================================================
-# Blender Script: Hex Dome Array V89
+# Blender Script: Hex Dome Array V90
 # (v82: honest do_diff() reporting + R07 seam bias)
 # (v83: stronger end-of-build cleanup pass)
 # (v84: per-cut manifold tracking — pinpointed L01/L06 pins)
 # (v85: try-before-commit safe_cut — confirmed clean, 0 failures)
 # (v86: per-pair PIN_Z override for Pair4 — L06/R07 pin lowered 5mm)
-# (v87: real bottom-face tile engraving, but with a Z-position bug)
-# (v88: fixed Z-position; L03/L06/R07/R08 -10mm, R05 +25mm)
-# NEW in v89: per direct visual confirmation — L03/L06/R07/R08 pushed
-# another 10mm further (-20mm total), R05 another 15mm further
-# (+40mm total), font size +10% (8.0 -> 8.8mm).
-# CAUTION: at +40mm, R05's label center sits right at ~78.5mm — R05's
-# own flat edge at this y-band is at x≈77mm (cx + cos30*S), so the
-# label center is now just past the tile's own boundary into open
-# air past the wall. It may print fine if the glyphs themselves still
-# fit mostly inside, but it's worth a direct look at the bottom face
-# before committing to a print — nudge back toward +35 if it's
-# clipping the edge.
+# (v87/v88: real bottom-face tile engraving, Z-position bug + fix)
+# (v89: offset refinement — L03/L06/R07/R08 -20mm, R05 +40mm, R02
+#  -10mm, font +10%)
+# NEW in v90: dedicated 10mm MIDI/DC cable port through R00's exterior
+# wall, bored straight to the Teensy cavity. Offset to x=50mm (off
+# R00's own center, 38.5mm) so it's a genuinely separate path from the
+# existing wire-hole shaft, per explicit request. Z is centered on the
+# minimum available wall height sampled along the whole path, not
+# guessed, so it stays inside material everywhere from entry to
+# cavity even as the dome height changes a lot along that distance.
 # ============================================================
 
 import bpy
@@ -25,7 +23,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V89 - OFFSET REFINEMENT + FONT SIZE +10% ===")
+print("=== HEX DOME ARRAY V90 - R00 DEDICATED CABLE PORT ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -68,6 +66,16 @@ MIRROR_BOTTOM_TEXT = False  # flip to True if the engraved numbers come
                              # out mirrored when you look at the actual
                              # bottom face (this is the one part worth
                              # eyeballing in Blender before printing)
+
+# v90: dedicated 10mm MIDI/DC cable port, R00 exterior wall straight
+# to the Teensy cavity. Offset off R00's own center x (38.5mm) so it
+# doesn't run straight through the existing wire-hole shaft, which
+# sits exactly at x=38.5 — per explicit request, this is a fully
+# separate path. x=50 stays inside both R00's NE edge and the
+# cavity's own x-range (9..59).
+CABLE_PORT_X   = 50.0
+CABLE_PORT_DIA = 10.0
+CABLE_PORT_R   = CABLE_PORT_DIA / 2.0
 
 blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
@@ -248,8 +256,44 @@ def make_hole_cutter(name, face_x, hole_y, hole_z, direction, depth, radius):
     obj.location=Vector((centre_x,hole_y,hole_z))
     return obj
 
+def make_hole_cutter_y(name, hole_x, y0, y1, hole_z, radius):
+    """v90: same idea as make_hole_cutter, but bored along Y instead
+    of X — used for the R00→cavity cable port. y0 should be clearly
+    outside the dome, y1 clearly inside/past the target region (same
+    'always overlap past the boundary, never end exactly on a face'
+    rule used by every other cutter in this script)."""
+    length=y1-y0; centre_y=(y0+y1)/2.0
+    mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new(); segs=64; half=length/2.0; bv,tv=[],[]
+    for i in range(segs):
+        a=2*math.pi*i/segs
+        x_off=radius*math.cos(a); z_off=radius*math.sin(a)
+        bv.append(bm.verts.new((x_off,-half,z_off))); tv.append(bm.verts.new((x_off,half,z_off)))
+    for i in range(segs):
+        j=(i+1)%segs; bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    obj.location=Vector((hole_x,centre_y,hole_z))
+    return obj
+
 def make_wire_hole_cutter(name, cx, cy):
     dz=dome_z(cx,cy); bottom=-2.0; top=dz+PLATE_H+2.0
+    height=top-bottom; center_z=(top+bottom)/2.0; offset=CUP_R-WIRE_HOLE_RADIUS
+    mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new(); segs=32; half=height/2.0; bv,tv=[],[]
+    for i in range(segs):
+        a=2*math.pi*i/segs; xo=WIRE_HOLE_RADIUS*math.cos(a); yo=WIRE_HOLE_RADIUS*math.sin(a)
+        bv.append(bm.verts.new((xo,yo,-half))); tv.append(bm.verts.new((xo,yo,half)))
+    for i in range(segs):
+        j=(i+1)%segs; bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    obj.location=Vector((cx,cy-offset,center_z))
+    return obj
+
+
     height=top-bottom; center_z=(top+bottom)/2.0; offset=CUP_R-WIRE_HOLE_RADIUS
     mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
     bpy.context.collection.objects.link(obj)
@@ -625,6 +669,40 @@ def add_bottom_engraving(solid_obj, tag, cx, cy):
     safe_cut(f"{tag} bottom engrave", solid_obj, cutter, primary='FLOAT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
+def add_r00_cable_port(right_obj):
+    """v90: dedicated straight 10mm port from outside R00's tile,
+    bored along Y, directly to the Teensy cavity — independent of the
+    sensor wire-hole shaft (explicit request: a separate route).
+    Z is centered on HALF THE MINIMUM available wall height along the
+    whole path, not just at the entry point — found by sampling
+    dome_z, not assumed. That minimum almost always occurs right at
+    the entry (farthest from the dome center = thinnest cross
+    section), so sizing for it guarantees the bore stays fully inside
+    material everywhere along its length, even though the dome height
+    varies a lot between R00's edge and the cavity."""
+    R00_CY = 100.0  # R00's own tile center y, from the grid
+    y_outer = R00_CY + S + 10.0          # comfortably outside R00's tip
+    y_inner = (CAVITY_D / 2.0) - 10.0    # 10mm past the cavity's near
+                                          # edge — guarantees the bore
+                                          # actually merges with the
+                                          # cavity void instead of
+                                          # leaving a thin uncut wall
+
+    samples = 40
+    heights = [PLATE_H + dome_z(CABLE_PORT_X, y_outer + (y_inner-y_outer)*i/(samples-1))
+               for i in range(samples)]
+    min_h = min(heights)
+    hole_z = min_h / 2.0
+    print(f"  R00 cable port: path height {min_h:.1f}..{max(heights):.1f}mm along "
+          f"x={CABLE_PORT_X:.0f}, centering bore at z={hole_z:.1f}mm")
+
+    cutter = make_hole_cutter_y("Hole_R00_Port", CABLE_PORT_X, y_outer, y_inner,
+                                 hole_z, CABLE_PORT_R)
+    apply_transforms(cutter)
+    safe_cut(f"R00 cable port ({CABLE_PORT_DIA:.0f}mm, z={hole_z:.0f})",
+             right_obj, cutter, primary='FLOAT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
 # ============================================================
 # BUILD SEQUENCE
 # ============================================================
@@ -658,6 +736,9 @@ apply_r07_canal_postdome(right_obj)
 
 print("\nStep 5: Teensy cavity (FLOAT, deep into dome structure)...")
 apply_cavity(right_obj)
+
+print("\nStep 5b: R00 cable port (10mm, straight to cavity, separate from wire hole)...")
+add_r00_cable_port(right_obj)
 
 # Snap bottom to z=0
 for obj in [left_obj,right_obj]:
