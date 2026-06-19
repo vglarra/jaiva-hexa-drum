@@ -1,11 +1,17 @@
 # ============================================================
-# Blender Script: Hex Dome Array V79
-# FLAT-FIRST + NORMAL-BASED DOME + FLOAT CAVITY
-# 1. Build flat plate (solid-first, no interior walls)
-# 2. Cut canals into flat plate (EXACT on simple geometry)
-# 3. Dome displacement via FACE NORMALS (robust against EXACT z-drift)
-# 4. Cup / wire / pin holes (EXACT post-dome)
-# 5. Teensy cavity (FLOAT — dome-surface ceiling, avoids 2-shell enclosed void)
+# Blender Script: Hex Dome Array V82
+# FIX: silent boolean failures were being reported as "✓" — every
+# do_diff() call now has its return value checked and reported
+# honestly, with a final FAILURES summary. This is almost certainly
+# why canals were "disappearing" in the slicer: the EXACT/FLOAT
+# booleans were failing internally, the modifier was removed without
+# cutting anything, and the script printed "✓" anyway.
+# FIX: R07 post-dome canal cutter was centered exactly ON the L/R
+# split plane (x=0), so half the cutter box had nothing to cut
+# against and the other half sat exactly coplanar with the model's
+# flat seam face — that's the degenerate sliver you saw. The cutter
+# is now biased fully into the RIGHT half with a small overlap past
+# the seam, so it never touches the seam face edge-on.
 # ============================================================
 
 import bpy
@@ -14,7 +20,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V79 - FLAT-FIRST + NORMAL DOME + FLOAT CAVITY ===")
+print("=== HEX DOME ARRAY V82 - HONEST FAILURE REPORTING + R07 SEAM FIX ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -51,6 +57,9 @@ blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
 print(f"PIN_Z={PIN_Z}mm  CANAL_DEPTH={CANAL_DEPTH}mm")
 print(f"Export: {export_dir}")
+
+# ---- Failure tracking (NEW in v82) ------------------------------------
+FAILURES = []   # list of (label, reason) tuples — printed at the very end
 
 # ---- Dome functions --------------------------------------------------
 def dome_z(x, y):
@@ -240,6 +249,11 @@ def apply_transforms(obj):
     bpy.ops.object.transform_apply(location=True,rotation=True,scale=True)
 
 def do_diff(target, cutter, solver='EXACT'):
+    """Returns True/False. NOTE (v82): callers must check this return
+    value — previously several call sites ignored it and printed a
+    success checkmark unconditionally, which is why failed canal cuts
+    looked successful in the console log but never actually removed
+    material."""
     cutter.hide_render=False; cutter.hide_viewport=False; cutter.hide_set(False)
     bpy.ops.object.select_all(action='DESELECT')
     target.select_set(True); bpy.context.view_layer.objects.active=target
@@ -248,10 +262,24 @@ def do_diff(target, cutter, solver='EXACT'):
     try:
         bpy.ops.object.modifier_apply(modifier="Diff"); return True
     except Exception as e:
-        print(f"    failed: {e}")
+        print(f"    failed ({solver}): {e}")
         try: target.modifiers.remove(mod)
         except: pass
         return False
+
+def do_diff_retry(target, cutter, solver='EXACT'):
+    """v82: if the requested solver fails, automatically retry once with
+    the other solver before giving up. EXACT and FLOAT fail on different
+    kinds of geometry (coplanar faces vs. precision drift), so trying
+    both catches more real cuts instead of silently leaving material
+    uncut."""
+    ok = do_diff(target, cutter, solver=solver)
+    if ok:
+        return True, solver
+    alt = 'FLOAT' if solver == 'EXACT' else 'EXACT'
+    print(f"    retrying with {alt}...")
+    ok2 = do_diff(target, cutter, solver=alt)
+    return ok2, (alt if ok2 else solver)
 
 def make_flat_hex_solid(grid_tiles, solid_name):
     """Flat hex plate (solid-first, no interior walls, no dome)."""
@@ -312,44 +340,112 @@ def get_bbox(obj):
     xs=[p.x for p in bb]; ys=[p.y for p in bb]
     return min(xs),max(xs),min(ys),max(ys)
 
+_R07_CANAL_IDX = 6  # CANAL_SEGMENTS[6] = (0.0, y0-_wo, 0.0, y1-_wo) — R07 vertical rise
+
 def apply_canals(solid_obj, half_char):
-    """EXACT canal cuts on flat plate — simple axis-aligned box × flat surface."""
+    """EXACT canal cuts on flat plate — simple axis-aligned box × flat surface.
+    R07's canal (index 6, x=0mm through tile center) is deferred to post-dome
+    step for the right half to avoid EXACT z-drift issues at cx=0.
+    v82: return value of every cut is now checked and reported honestly."""
     xmin,xmax,ymin,ymax=get_bbox(solid_obj)
     for si,(sx0,sy0,sx1,sy1) in enumerate(CANAL_SEGMENTS):
+        if half_char == 'R' and si == _R07_CANAL_IDX:
+            print(f"  R canal[{si}] R07 → deferred to post-dome")
+            continue
         clipped=clip_segment(sx0,sy0,sx1,sy1,xmin,xmax,ymin,ymax,margin=3.0)
         if clipped is None: continue
         nx0,ny0,nx1,ny1=clipped
         if abs(nx0-nx1)<0.5 and abs(ny0-ny1)<0.5: continue
         canal=make_canal_cutter(f"Canal_{half_char}_{si}",nx0,ny0,nx1,ny1)
         apply_transforms(canal)
-        do_diff(solid_obj,canal,solver='EXACT')
+        ok, used = do_diff_retry(solid_obj,canal,solver='EXACT')
         bpy.data.objects.remove(canal,do_unlink=True)
-        print(f"  {half_char} canal[{si}] ✓")
+        label=f"{half_char} canal[{si}]"
+        if ok:
+            print(f"  {label} ✓ ({used})")
+        else:
+            print(f"  {label} ✗ FAILED — material NOT removed")
+            FAILURES.append((label, "boolean failed (EXACT+FLOAT)"))
+
+def apply_r07_canal_postdome(right_obj):
+    """Apply R07 vertical canal AFTER dome displacement, using FLOAT.
+    v82 fix: the cutter used to be centered exactly on x=0 — the L/R
+    split plane — so it straddled the seam: half the box had nothing
+    to cut against (outside right_obj's geometry) and the other half
+    sat exactly coplanar with the model's flat seam face. That
+    coincident-face condition is what produced the degenerate sliver
+    seen in the viewport. Now the cutter is biased fully into the
+    RIGHT half, with only a small 1mm overlap past the seam so the
+    boolean never runs edge-on along an existing face."""
+    sx0,sy0,sx1,sy1 = CANAL_SEGMENTS[_R07_CANAL_IDX]
+    xmin,xmax,ymin,ymax = get_bbox(right_obj)
+    clipped = clip_segment(sx0,sy0,sx1,sy1,xmin,xmax,ymin,ymax,margin=3.0)
+    if clipped is None:
+        print("  R07 canal post-dome: nothing to cut (clipped out)"); return
+    nx0,ny0,nx1,ny1 = clipped
+    if abs(nx0-nx1)<0.5 and abs(ny0-ny1)<0.5:
+        print("  R07 canal post-dome: segment too short"); return
+
+    # --- biased box, replaces make_canal_cutter's symmetric ±w2 ---
+    OVERLAP_PAST_SEAM = 1.0   # mm sticking out past SPLIT_X into empty space — harmless
+    bx0 = SPLIT_X - OVERLAP_PAST_SEAM
+    bx1 = bx0 + CANAL_WIDTH
+    ov  = 2.0
+    by0,by1 = min(ny0,ny1)-ov, max(ny0,ny1)+ov
+    canal = make_box_cutter("Canal_R07_postdome", bx0, by0, -2.0,
+                             bx1-bx0, by1-by0, CANAL_DEPTH+4.0)
+    apply_transforms(canal)
+    ok, used = do_diff_retry(right_obj, canal, solver='FLOAT')
+    bpy.data.objects.remove(canal, do_unlink=True)
+    if ok:
+        print(f"  R07 canal (post-dome) ✓ ({used}) — biased x={bx0:.1f}..{bx1:.1f}")
+    else:
+        print("  R07 canal (post-dome) ✗ FAILED — material NOT removed")
+        FAILURES.append(("R07 canal (post-dome)", "boolean failed (FLOAT+EXACT)"))
 
 def apply_tile_cuts(solid_obj, tag, half_char, tile_idx, cx, cy):
-    """Post-dome EXACT cuts: cup, wire hole, pin hole.
-    Cavity is applied separately (FLOAT) after all tile cuts."""
+    """Post-dome cuts:
+    - Cup / wire: FLOAT (dome surface is complex triangulation; FLOAT more robust)
+    - Pin holes: EXACT (seam walls are flat vertical rectangles → clean EXACT)
+    Cavity applied separately after all tile cuts.
+    v82: every cut's success/failure is now checked and reported."""
     cup=make_cup_cutter(f"Cut_{tag}",cx,cy)
-    apply_transforms(cup); do_diff(solid_obj,cup,solver='EXACT')
+    apply_transforms(cup)
+    ok_cup, used_cup = do_diff_retry(solid_obj,cup,solver='FLOAT')
     bpy.data.objects.remove(cup,do_unlink=True)
+
     wire=make_wire_hole_cutter(f"Wire_{tag}",cx,cy)
-    apply_transforms(wire); do_diff(solid_obj,wire,solver='EXACT')
+    apply_transforms(wire)
+    ok_wire, used_wire = do_diff_retry(solid_obj,wire,solver='FLOAT')
     bpy.data.objects.remove(wire,do_unlink=True)
-    print(f"  {tag} cup+wire ✓")
+
+    if ok_cup and ok_wire:
+        print(f"  {tag} cup+wire ✓")
+    else:
+        if not ok_cup:
+            print(f"  {tag} cup ✗ FAILED"); FAILURES.append((f"{tag} cup","boolean failed"))
+        if not ok_wire:
+            print(f"  {tag} wire ✗ FAILED"); FAILURES.append((f"{tag} wire","boolean failed"))
+
     key=(half_char,tile_idx)
     if key in PIN_ASSIGNMENTS:
         fside,dirn,lbl=PIN_ASSIGNMENTS[key]
         face_x=cx+cos30*S if fside=='R' else cx-cos30*S
         r=PIN_RADIUS+PIN_CLEARANCE
         hole=make_hole_cutter(f"Hole_{tag}",face_x,cy,PIN_Z,dirn,PIN_DEPTH,r)
-        apply_transforms(hole); do_diff(solid_obj,hole,solver='EXACT')
+        apply_transforms(hole)
+        ok_pin, used_pin = do_diff_retry(solid_obj,hole,solver='EXACT')
         bpy.data.objects.remove(hole,do_unlink=True)
-        print(f"  {tag} {lbl} pin ✓")
+        if ok_pin:
+            print(f"  {tag} {lbl} pin ✓ ({used_pin})")
+        else:
+            print(f"  {tag} {lbl} pin ✗ FAILED")
+            FAILURES.append((f"{tag} {lbl} pin","boolean failed"))
 
 def apply_cavity(solid_obj):
     """Teensy cavity — deep pocket into dome (CAVITY_H_SAFE ≈ 30mm).
-    Uses FLOAT solver: dome-surface ceiling × axis-aligned box.
-    FLOAT avoids the 2-shell 'enclosed void' issue EXACT creates here."""
+    Uses FLOAT: EXACT creates a fully enclosed void (0 shell) when the
+    cavity ceiling doesn't pierce the bottom face cleanly."""
     cav=make_box_cutter("Cavity_R",
                         CAVITY_X_OFFSET, -CAVITY_D/2.0, -2.0,
                         CAVITY_W, CAVITY_D, CAVITY_H_SAFE+2.0)
@@ -357,6 +453,8 @@ def apply_cavity(solid_obj):
     ok=do_diff(solid_obj,cav,solver='FLOAT')
     bpy.data.objects.remove(cav,do_unlink=True)
     print(f"  Cavity {'✓' if ok else '⚠ FAIL'}")
+    if not ok:
+        FAILURES.append(("Teensy cavity","boolean failed"))
 
 def add_tile_label(label,cx,cy):
     dz=dome_z(cx,cy)
@@ -400,6 +498,9 @@ for i,(cx,cy) in enumerate(right_grid):
     apply_tile_cuts(right_obj,tag,'R',i,cx,cy)
     add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
 
+print("\nStep 4b: R07 vertical canal — post-dome FLOAT, biased off the seam...")
+apply_r07_canal_postdome(right_obj)
+
 print("\nStep 5: Teensy cavity (FLOAT, deep into dome structure)...")
 apply_cavity(right_obj)
 
@@ -426,6 +527,18 @@ for obj in [left_obj,right_obj]:
     w,d=max(xs)-min(xs),max(ys)-min(ys)
     print(f"  {obj.name}: {v}v {f}f {w:.0f}×{d:.0f}mm {'✓' if w<=340 and d<=340 else '⚠'}")
 
+# ---- Failure summary (NEW in v82) -------------------------------------
+print("\n" + "="*60)
+if FAILURES:
+    print(f"⚠ {len(FAILURES)} BOOLEAN CUT(S) FAILED — these features are MISSING from the export:")
+    for label, reason in FAILURES:
+        print(f"   ✗ {label}: {reason}")
+    print("These will NOT appear in the STL even though earlier versions")
+    print("of this script would have printed '✓' for them regardless.")
+else:
+    print("✓ All boolean cuts succeeded — every canal/cup/wire/pin/cavity is real.")
+print("="*60)
+
 # ---- Export ----------------------------------------------------------
 print("\nExporting...")
 for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
@@ -447,3 +560,4 @@ for obj,suffix in [(left_obj,"L"),(right_obj,"R")]:
 
 print("\n=== DONE ===")
 print(f"CANAL_DEPTH={CANAL_DEPTH}mm  CAVITY_H_SAFE={CAVITY_H_SAFE:.1f}mm  PIN_Z={PIN_Z}mm")
+print(f"Failures: {len(FAILURES)}")
