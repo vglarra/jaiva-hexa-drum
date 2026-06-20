@@ -1,5 +1,5 @@
 # ============================================================
-# Blender Script: Hex Dome Array V90
+# Blender Script: Hex Dome Array V100
 # (v82: honest do_diff() reporting + R07 seam bias)
 # (v83: stronger end-of-build cleanup pass)
 # (v84: per-cut manifold tracking — pinpointed L01/L06 pins)
@@ -8,13 +8,22 @@
 # (v87/v88: real bottom-face tile engraving, Z-position bug + fix)
 # (v89: offset refinement — L03/L06/R07/R08 -20mm, R05 +40mm, R02
 #  -10mm, font +10%)
-# NEW in v90: dedicated 10mm MIDI/DC cable port through R00's exterior
-# wall, bored straight to the Teensy cavity. Offset to x=50mm (off
-# R00's own center, 38.5mm) so it's a genuinely separate path from the
-# existing wire-hole shaft, per explicit request. Z is centered on the
-# minimum available wall height sampled along the whole path, not
-# guessed, so it stays inside material everywhere from entry to
-# cavity even as the dome height changes a lot along that distance.
+# (v90: dedicated 10mm MIDI/DC cable port, R00 to the Teensy cavity)
+# (v91: rounded inside corners at canal junctions, seam left square)
+# (v92: rounded canal dead-end caps + a missed junction fix)
+# (v93: R07 canal depth fix + centered on x=0)
+# (v94: nudged R07 canal + bumped CAP_RADIUS to 5.3mm for "robustness")
+# (v95: real R07 fix — reordered the canal cut before any wire holes,
+#  using the simple box+separate-circle approach — measured 0 issues)
+# (v96: reverted CAP_RADIUS to exact 5.0mm tangency)
+# (v97/v98: unified box+cap into one single-mesh cutter for every
+#  canal, fixed its winding order)
+# (v99: R07 reverted to the v95 two-cut approach — down to 6 minor
+#  residual issues total, all in non-structural rounding details,
+#  confirmed working in an actual slice/print test)
+# NEW in v100: Teensy cavity extended 10mm in +X (CAVITY_W 50→60mm),
+# reaching further into R05's footprint per request. CAVITY_X_OFFSET
+# (left edge) unchanged.
 # ============================================================
 
 import bpy
@@ -23,7 +32,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V90 - R00 DEDICATED CABLE PORT ===")
+print("=== HEX DOME ARRAY V100 - CAVITY EXTENDED 10MM IN +X ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -52,7 +61,13 @@ CANAL_WIDTH = 10.0
 CANAL_DEPTH =  3.0   # groove depth (leaves 3mm solid roof in 6mm plate)
 
 CAVITY_X_OFFSET = 9.0
-CAVITY_W = 50.0
+CAVITY_W = 60.0   # v100: was 50.0 — extended 10mm in +X per request,
+                   # reaching further into R05's footprint. Left edge
+                   # (CAVITY_X_OFFSET=9) is unchanged; only the right
+                   # edge moves, from x=59 to x=69. Every canal segment
+                   # and the CAVITY_H_SAFE calculation reference these
+                   # constants directly, so they adjust automatically —
+                   # no other coordinates need to change by hand.
 CAVITY_D = 90.0
 CAVITY_H = 30.0
 
@@ -150,19 +165,56 @@ print(f"Cavity {CAVITY_W:.0f}×{CAVITY_D:.0f}×{CAVITY_H_SAFE:.1f}mm deep into d
 # ---- Canal segments --------------------------------------------------
 _wo = CUP_R - WIRE_HOLE_RADIUS
 CANAL_SEGMENTS = [
-    (-2.0*H,                     y2-_wo,  CAVITY_X_OFFSET,              y2-_wo),
-    (CAVITY_X_OFFSET + CAVITY_W, y2-_wo,  2.0*H,                        y2-_wo),
-    (-1.5*H,  y1-_wo,   1.5*H,  y1-_wo),
-    (0.5*H,   y3-_wo,   1.5*H,  y3-_wo),
-    (0.5*H,   CAVITY_D/2.0, 0.5*H, y3-_wo),
-    (0.5*H,   y1-_wo,   0.5*H, -CAVITY_D/2.0),
-    (0.0,     y0-_wo,   0.0,  y1-_wo),
-    (H,       y0-_wo,   H,    y1-_wo),
-    (-1.5*H,  y3-_wo,  -0.5*H,  y3-_wo),
-    (-H,      y3-_wo,  -H,      y2-_wo),
-    (-H,      y1-_wo,  -H,      y2-_wo),
-    (-H,      y0-_wo,  -H,      y1-_wo),
+    # (x0, y0, x1, y1, cap0, cap1) — cap0/cap1 say whether THAT end is
+    # a true dead end (wire-hole terminus) needing a rounded semicircle
+    # cap, vs. a junction/cavity-opening/seam end that just needs the
+    # normal small overlap to merge cleanly into whatever's there.
+    (-2.0*H,                     y2-_wo,  CAVITY_X_OFFSET,              y2-_wo, True,  False),  # L02 cap … cavity
+    (CAVITY_X_OFFSET + CAVITY_W, y2-_wo,  2.0*H,                        y2-_wo, False, True),    # cavity … R04 cap
+    (-1.5*H,  y1-_wo,   1.5*H,  y1-_wo, True,  True),     # L04 cap … R06 cap
+    (0.5*H,   y3-_wo,   1.5*H,  y3-_wo, False, True),     # junction … R01 cap
+    (0.5*H,   CAVITY_D/2.0, 0.5*H, y3-_wo, False, False), # cavity … junction
+    (0.5*H,   y1-_wo,   0.5*H, -CAVITY_D/2.0, False, False), # junction … cavity
+    (0.0,     y0-_wo,   0.0,  y1-_wo, True,  False),      # R07 cap … seam (handled separately, post-dome)
+    (H,       y0-_wo,   H,    y1-_wo, True,  False),      # R08 cap … junction
+    (-1.5*H,  y3-_wo,  -0.5*H,  y3-_wo, True,  True),     # L00 cap … L01 cap
+    (-H,      y3-_wo,  -H,      y2-_wo, False, False),    # junction … junction
+    (-H,      y1-_wo,  -H,      y2-_wo, False, False),    # junction … junction
+    (-H,      y0-_wo,  -H,      y1-_wo, True,  False),    # L06 cap … junction
 ]
+
+# v91: every point where two canal segments meet at a corner/T/cross,
+# worked out by hand from the endpoints above. Rounding these makes
+# wire-pulling smoother (no sharp 90° snag point) and prints cleaner.
+# Deliberately NOT included: (0, y1-_wo), where R07's canal merges
+# into the shared y1-row trunk — that point sits exactly on x=0, the
+# L/R split line, and has to stay flat/square for the two halves to
+# mate cleanly. Every junction below is safely interior to one half.
+CANAL_FILLET_RADIUS = 7.0   # mm — slightly larger than the canal's own
+                             # 5mm half-width, just enough to round the
+                             # corner without noticeably widening the
+                             # channel
+CANAL_JUNCTIONS = [
+    (0.5*H, y3-_wo, 'R'),   # R00 wire-drop meets the y3-row trunk
+    (0.5*H, y1-_wo, 'R'),   # R05 wire-drop meets the y1-row trunk
+    (H,     y1-_wo, 'R'),   # v92 fix: R08's column crosses the y1-row
+                            # trunk at R06's x — missed in v91
+    (-H,    y3-_wo, 'L'),   # y3-row trunk meets the L03/L06 column
+    (-H,    y2-_wo, 'L'),   # L03/L06 column crosses the y2-row trunk
+    (-H,    y1-_wo, 'L'),   # L03/L06 column crosses the y1-row trunk
+]
+
+# v97: caps are no longer a separate boolean step. v92's approach (cut
+# the straight canal, THEN boolean-union a separate circle onto its
+# end) needs that circle and the box to merge via a boolean — and the
+# only radius with zero visual kink (exact tangency) is exactly the
+# float-precision case CSG solvers are worst at, which is what
+# produced the malformed lens-shaped cusp seen in the viewport.
+# make_canal_with_caps_cutter below builds the straight sides AND any
+# semicircular cap as ONE continuous polygon from the start, so there
+# is no separate shape to union — cap0/cap1 in CANAL_SEGMENTS now
+# drive that directly, and apply_canal_caps / CAP_RADIUS / CANAL_CAPS
+# are retired.
 
 def clip_segment(x0, y0, x1, y1, xmin, xmax, ymin, ymax, margin=3.0):
     xmin+=margin; xmax-=margin; ymin+=margin; ymax-=margin
@@ -323,6 +375,11 @@ def make_box_cutter(name, x0, y0, z0, w, d, h):
     return obj
 
 def make_canal_cutter(name, x0, y0, x1, y1):
+    """v97: superseded by make_canal_with_caps_cutter for every
+    pre-dome canal (cap0=cap1=False reproduces this exactly).
+    v99: back in active use for R07's post-dome canal specifically —
+    a plain box turned out to be the more robust choice against that
+    one harder, post-dome target. See apply_r07_canal_postdome."""
     w2=CANAL_WIDTH/2.0; ov=2.0
     if abs(y0-y1)<0.01:
         bx0,bx1=min(x0,x1)-ov,max(x0,x1)+ov; by0,by1=y0-w2,y0+w2
@@ -330,10 +387,123 @@ def make_canal_cutter(name, x0, y0, x1, y1):
         bx0,bx1=x0-w2,x0+w2; by0,by1=min(y0,y1)-ov,max(y0,y1)+ov
     return make_box_cutter(name,bx0,by0,-0.1,bx1-bx0,by1-by0,CANAL_DEPTH+0.1)
 
+def make_canal_with_caps_cutter(name, x0, y0, x1, y1, cap0, cap1,
+                                  width=CANAL_WIDTH, depth=CANAL_DEPTH):
+    """v97: one watertight cutter per canal segment — straight sides,
+    with an optional semicircular cap built into the SAME outline at
+    either end, instead of cutting a plain box and separately
+    boolean-unioning a circle onto it afterward. There's no seam
+    between 'box' and 'circle' for the solver to trip on here, because
+    the cap curve and the straight walls are the same continuous
+    polygon from the start — this is what replaces the old
+    make_canal_cutter + make_fillet_cutter(cap) combination for ends
+    that need rounding.
+    cap0/cap1: whether the (x0,y0)/(x1,y1) end gets a semicircle. The
+    non-capped case still gets the usual small overlap extension so it
+    merges cleanly into whatever's there (junction, cavity, seam)."""
+    w2 = width/2.0
+    L = math.hypot(x1-x0, y1-y0)
+    if L < 0.01:
+        return make_box_cutter(name, x0-w2, y0-w2, -0.1, width, width, depth+0.1)
+    ux, uy = (x1-x0)/L, (y1-y0)/L     # unit vector along the segment
+    nx, ny = -uy, ux                  # unit normal (perpendicular)
+    ov = 2.0
+
+    s0 = 0.0 if cap0 else -ov
+    s1 = L   if cap1 else  L+ov
+
+    def P(s, t):
+        return (x0+ux*s+nx*w2*t, y0+uy*s+ny*w2*t)
+
+    pts = [P(s0, 1), P(s1, 1)]
+    if cap1:
+        a0 = math.atan2(ny, nx)
+        for i in range(1, 16):
+            a = a0 - math.pi*i/16
+            pts.append((x1 + w2*math.cos(a), y1 + w2*math.sin(a)))
+    pts.append(P(s1, -1)); pts.append(P(s0, -1))
+    if cap0:
+        a0 = math.atan2(-ny, -nx)
+        for i in range(1, 16):
+            a = a0 - math.pi*i/16
+            pts.append((x0 + w2*math.cos(a), y0 + w2*math.sin(a)))
+
+    # v98 fix: the traversal above builds the outline CLOCKWISE, but
+    # every other cutter in this script (the circular ones especially,
+    # via increasing-angle = CCW point generation) assumes
+    # counter-clockwise winding for outward-facing normals. That
+    # mismatch flipped this cutter's faces — which explains both
+    # symptoms at once: a boolean difference with inverted normals can
+    # fail to remove material at all (R07's canal vanishing) and can
+    # also produce wrong/extra geometry where it shouldn't (the
+    # unexpected tall protrusion). Reversing here matches the
+    # established convention.
+    pts.reverse()
+
+    mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new()
+    z0,z1=-0.1, depth+0.1
+    bv=[bm.verts.new((px,py,z0)) for px,py in pts]
+    tv=[bm.verts.new((px,py,z1)) for px,py in pts]
+    n=len(pts)
+    for i in range(n):
+        j=(i+1)%n
+        bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    return obj
+
+def make_fillet_cutter(name, x, y, radius=CANAL_FILLET_RADIUS):
+    """v91: a vertical cylinder centered on a canal junction, cut to
+    the same z-range as the canals themselves. A plain circle naturally
+    rounds whichever inside corners meet at that point — works the
+    same whether it's an L-bend, a T-junction, or a full cross, with
+    no need to work out exactly which quadrant is concave."""
+    mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new(); segs=32
+    z0,z1=-0.1, CANAL_DEPTH+0.1
+    bv,tv=[],[]
+    for i in range(segs):
+        a=2*math.pi*i/segs
+        xo=radius*math.cos(a); yo=radius*math.sin(a)
+        bv.append(bm.verts.new((xo,yo,z0))); tv.append(bm.verts.new((xo,yo,z1)))
+    for i in range(segs):
+        j=(i+1)%segs; bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    obj.location=Vector((x,y,0.0))
+    return obj
+
 def apply_transforms(obj):
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True); bpy.context.view_layer.objects.active=obj
     bpy.ops.object.transform_apply(location=True,rotation=True,scale=True)
+
+def apply_canal_fillets(left_obj, right_obj):
+    """v91: round the inside corners of the canal network at every
+    junction in CANAL_JUNCTIONS — deliberately skipping the one that
+    sits on the L/R seam, so the two halves still mate flush there.
+    Run pre-dome, same stage as the straight canal cuts, since it's
+    the same flat, simple geometry."""
+    for x,y,half in CANAL_JUNCTIONS:
+        target = left_obj if half=='L' else right_obj
+        cutter = make_fillet_cutter(f"Fillet_{half}_{x:.0f}_{y:.0f}", x, y)
+        apply_transforms(cutter)
+        safe_cut(f"{half} canal fillet ({x:.0f},{y:.0f})", target, cutter, primary='EXACT')
+        bpy.data.objects.remove(cutter, do_unlink=True)
+
+# v97: apply_canal_caps retired — see make_canal_with_caps_cutter and
+# the cap0/cap1 fields now built into CANAL_SEGMENTS above. Caps are
+# cut as part of the same single mesh as their canal, not as a
+# separate boolean step anymore.
+
+# v97: apply_r07_cap_postdome retired — its cap is now built directly
+# into apply_r07_canal_postdome's own cutter (cap0=True), same as
+# every other capped canal segment. No more separate nudge-to-match
+# bookkeeping between two cuts that need to stay aligned with each
+# other.
 
 def do_diff(target, cutter, solver='EXACT'):
     """Returns True/False. NOTE (v82): callers must check this return
@@ -417,7 +587,13 @@ def safe_cut(label, target, cutter, primary='EXACT'):
             bpy.data.objects.remove(d, do_unlink=True)
     bpy.data.objects.remove(best_dup, do_unlink=True)
 
-    if best_score == 0:
+    if best_score <= 0:
+        # v94 fix: a score of exactly 0 means clean; a NEGATIVE score
+        # means this cut's baseline already had leftover non-manifold
+        # edges from something earlier, and this cut happened to
+        # absorb/fix some of them — that's an improvement, not damage.
+        # The old `== 0` check mis-reported negative scores as "N
+        # manifold issues" when N was actually negative.
         loser = primary if best_solver == alt else alt
         print(f"  {label} ✓ ({best_solver}) — {loser} left damage, used {best_solver} instead")
     else:
@@ -504,9 +680,12 @@ def apply_canals(solid_obj, half_char):
     R07's canal (index 6, x=0mm through tile center) is deferred to post-dome
     step for the right half to avoid EXACT z-drift issues at cx=0.
     v85: each cut now goes through safe_cut — tried on a disposable
-    copy first, only committed if the result is manifold-clean."""
+    copy first, only committed if the result is manifold-clean.
+    v97: cap0/cap1 (now part of each CANAL_SEGMENTS entry) build any
+    needed rounded end directly into the cutter's own outline — see
+    make_canal_with_caps_cutter."""
     xmin,xmax,ymin,ymax=get_bbox(solid_obj)
-    for si,(sx0,sy0,sx1,sy1) in enumerate(CANAL_SEGMENTS):
+    for si,(sx0,sy0,sx1,sy1,cap0,cap1) in enumerate(CANAL_SEGMENTS):
         if half_char == 'R' and si == _R07_CANAL_IDX:
             print(f"  R canal[{si}] R07 → deferred to post-dome")
             continue
@@ -514,22 +693,39 @@ def apply_canals(solid_obj, half_char):
         if clipped is None: continue
         nx0,ny0,nx1,ny1=clipped
         if abs(nx0-nx1)<0.5 and abs(ny0-ny1)<0.5: continue
-        canal=make_canal_cutter(f"Canal_{half_char}_{si}",nx0,ny0,nx1,ny1)
+        canal=make_canal_with_caps_cutter(f"Canal_{half_char}_{si}",nx0,ny0,nx1,ny1,cap0,cap1)
         apply_transforms(canal)
         safe_cut(f"{half_char} canal[{si}]", solid_obj, canal, primary='EXACT')
         bpy.data.objects.remove(canal,do_unlink=True)
 
 def apply_r07_canal_postdome(right_obj):
-    """Apply R07 vertical canal AFTER dome displacement, using FLOAT.
-    v82 fix: the cutter used to be centered exactly on x=0 — the L/R
-    split plane — so it straddled the seam: half the box had nothing
-    to cut against (outside right_obj's geometry) and the other half
-    sat exactly coplanar with the model's flat seam face. That
-    coincident-face condition is what produced the degenerate sliver
-    seen in the viewport. Now the cutter is biased fully into the
-    RIGHT half, with only a small 1mm overlap past the seam so the
-    boolean never runs edge-on along an existing face."""
-    sx0,sy0,sx1,sy1 = CANAL_SEGMENTS[_R07_CANAL_IDX]
+    """Apply R07 vertical canal AFTER dome displacement (deferred to
+    avoid the EXACT z-drift that breaks dome-lift detection when this
+    cut happens pre-dome at cx=0 — see _R07_CANAL_IDX above).
+    v93: rebuilt to match every other canal exactly — same depth as
+    every other canal, centered on R07's own hole at x=0.
+    v94: added a small nudge off dead-center — turned out not to be
+    the actual cause (same 11 issues persisted regardless), but kept
+    as cheap extra robustness.
+    v97/v98: tried the unified single-mesh capsule cutter (with the
+    cap built in) here too — made things WORSE (26 manifold issues,
+    up from 11), even though that same cutter works perfectly for
+    every OTHER capped canal (L00,L01,L02,L04,L06,R01,R04,R06,R08 all
+    report zero issues with it). The common thread isn't the cutter
+    shape — it's that R07 is the ONLY canal cut post-dome, against a
+    far more complex, irregularly-triangulated surface than every
+    other canal gets (those are all cut on the flat plate, before the
+    dome even exists). More cutter complexity is the wrong direction
+    against a harder target.
+    v99 fix: back to the proven simpler two-cut approach for this one
+    special case — a plain box (no cap baked in) here, then a
+    separate circle for the cap right after (see apply_r07_cap_postdome).
+    This combination measured zero failures back when it was last used
+    (right after the v95 reorder fix) — keeping the unified cutter for
+    every other (pre-dome) canal, where it's provably the better fit."""
+    R07_X_NUDGE = 0.4   # mm, off dead-center — cheap extra robustness,
+                         # kept from v94 even though it wasn't the fix
+    sx0,sy0,sx1,sy1,cap0,cap1 = CANAL_SEGMENTS[_R07_CANAL_IDX]
     xmin,xmax,ymin,ymax = get_bbox(right_obj)
     clipped = clip_segment(sx0,sy0,sx1,sy1,xmin,xmax,ymin,ymax,margin=3.0)
     if clipped is None:
@@ -537,18 +733,21 @@ def apply_r07_canal_postdome(right_obj):
     nx0,ny0,nx1,ny1 = clipped
     if abs(nx0-nx1)<0.5 and abs(ny0-ny1)<0.5:
         print("  R07 canal post-dome: segment too short"); return
+    nx0 += R07_X_NUDGE; nx1 += R07_X_NUDGE
 
-    # --- biased box, replaces make_canal_cutter's symmetric ±w2 ---
-    OVERLAP_PAST_SEAM = 1.0   # mm sticking out past SPLIT_X into empty space — harmless
-    bx0 = SPLIT_X - OVERLAP_PAST_SEAM
-    bx1 = bx0 + CANAL_WIDTH
-    ov  = 2.0
-    by0,by1 = min(ny0,ny1)-ov, max(ny0,ny1)+ov
-    canal = make_box_cutter("Canal_R07_postdome", bx0, by0, -2.0,
-                             bx1-bx0, by1-by0, CANAL_DEPTH+4.0)
+    canal = make_canal_cutter("Canal_R07_postdome", nx0, ny0, nx1, ny1)
     apply_transforms(canal)
-    safe_cut("R07 canal (post-dome)", right_obj, canal, primary='FLOAT')
+    safe_cut("R07 canal (post-dome, nudged 0.4mm, plain box)", right_obj, canal, primary='EXACT')
     bpy.data.objects.remove(canal, do_unlink=True)
+
+    if cap0:
+        cap_x, cap_y = nx0, ny0   # the wire-hole end, using the same
+                                   # (clipped, nudged) coordinates the
+                                   # canal cut itself just used
+        cap = make_fillet_cutter("Cap_R07_postdome", cap_x, cap_y, radius=CANAL_WIDTH/2.0)
+        apply_transforms(cap)
+        safe_cut("R07 canal cap (post-dome, separate)", right_obj, cap, primary='EXACT')
+        bpy.data.objects.remove(cap, do_unlink=True)
 
 def apply_tile_cuts(solid_obj, tag, half_char, tile_idx, cx, cy):
     """Post-dome cuts:
@@ -715,9 +914,17 @@ print("\nStep 2: Cut canals into flat plates (EXACT on simple geometry)...")
 apply_canals(left_obj,  'L')
 apply_canals(right_obj, 'R')
 
+print("\nStep 2b: Round canal junction corners (skipping the L/R seam joint)...")
+apply_canal_fillets(left_obj, right_obj)
+# v97: dead-end caps are now built directly into apply_canals' own
+# cutters via cap0/cap1 — no separate "Step 2c" pass needed anymore.
+
 print("\nStep 3: Add dome displacement via face normals (R07-safe)...")
 add_dome_to_top(left_obj)
 add_dome_to_top(right_obj)
+
+print("\nStep 3b: R07 vertical canal — post-dome, BEFORE any tile's cup/wire/pin...")
+apply_r07_canal_postdome(right_obj)
 
 print("\nStep 4: Cut cups / wire holes / pin holes (EXACT post-dome)...")
 for i,(cx,cy) in enumerate(left_grid):
@@ -730,9 +937,6 @@ for i,(cx,cy) in enumerate(right_grid):
     apply_tile_cuts(right_obj,tag,'R',i,cx,cy)
     add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
     add_bottom_engraving(right_obj,tag,cx,cy)
-
-print("\nStep 4b: R07 vertical canal — post-dome FLOAT, biased off the seam...")
-apply_r07_canal_postdome(right_obj)
 
 print("\nStep 5: Teensy cavity (FLOAT, deep into dome structure)...")
 apply_cavity(right_obj)
