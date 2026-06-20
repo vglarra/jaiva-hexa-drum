@@ -1,5 +1,5 @@
 # ============================================================
-# Blender Script: Hex Dome Array V100
+# Blender Script: Hex Dome Array V101
 # (v82: honest do_diff() reporting + R07 seam bias)
 # (v83: stronger end-of-build cleanup pass)
 # (v84: per-cut manifold tracking — pinpointed L01/L06 pins)
@@ -13,17 +13,27 @@
 # (v92: rounded canal dead-end caps + a missed junction fix)
 # (v93: R07 canal depth fix + centered on x=0)
 # (v94: nudged R07 canal + bumped CAP_RADIUS to 5.3mm for "robustness")
-# (v95: real R07 fix — reordered the canal cut before any wire holes,
-#  using the simple box+separate-circle approach — measured 0 issues)
+# (v95: real R07 fix — reordered the canal cut before any wire holes)
 # (v96: reverted CAP_RADIUS to exact 5.0mm tangency)
-# (v97/v98: unified box+cap into one single-mesh cutter for every
-#  canal, fixed its winding order)
-# (v99: R07 reverted to the v95 two-cut approach — down to 6 minor
-#  residual issues total, all in non-structural rounding details,
+# (v97/v98: unified box+cap single-mesh canal cutter, fixed winding)
+# (v99: R07 back to the simpler two-cut approach — 6 minor residuals,
 #  confirmed working in an actual slice/print test)
-# NEW in v100: Teensy cavity extended 10mm in +X (CAVITY_W 50→60mm),
-# reaching further into R05's footprint per request. CAVITY_X_OFFSET
-# (left edge) unchanged.
+# (v100: Teensy cavity extended 10mm in +X)
+# (v101: 4 mounting holes for attaching external devices with a
+# pin (L00/L02: 10mm dia, L04/L06: 20mm dia, all 30mm deep), each
+# bored through that tile's own natural exterior wall rather than a
+# single fixed axis — direction varies per tile, verified against
+# actual grid adjacency (not assumed) and checked numerically for fit
+# against the dome's variable height before shipping. L06's most-
+# radially-outward wall was measured 0.3mm too thin for its 20mm hole
+# and switched to its west wall (1.3mm margin) instead. Caught and
+# fixed a real sign bug during that verification: the bore direction
+# was pointing outward into open air instead of inward into material.)
+# (v102: diameters reduced per request — L00/L02 10mm→to 8mm,
+#  L04/L06 20mm→to 17mm)
+# NEW in v103: added a 5th mounting hole, L01, same NW surface
+# direction as L00 per request — confirmed L01 genuinely has that
+# wall open (not a seam), 16mm dia x 30mm deep, 4.3mm fit margin.
 # ============================================================
 
 import bpy
@@ -32,7 +42,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V100 - CAVITY EXTENDED 10MM IN +X ===")
+print("=== HEX DOME ARRAY V103 - L01 MOUNTING HOLE ADDED ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -91,6 +101,37 @@ MIRROR_BOTTOM_TEXT = False  # flip to True if the engraved numbers come
 CABLE_PORT_X   = 50.0
 CABLE_PORT_DIA = 10.0
 CABLE_PORT_R   = CABLE_PORT_DIA / 2.0
+
+# v101: 4 mounting holes for attaching external devices with a pin
+# later, on L00/L02/L04/L06. Each tile's exterior wall is picked as
+# the edge with NO neighboring tile whose normal direction is closest
+# to the radial direction from the dome center to that tile — i.e.
+# the wall pointing most directly away from the dome. L00 and L06 are
+# corner-ish tiles with 3 exterior edges each, so this isn't always
+# the same compass direction; verified by checking actual grid
+# adjacency, not assumed. L06's literal east edge (which IS
+# geometrically open on left_obj alone) is correctly excluded because
+# R07 occupies that space across the seam — it's already used by the
+# Pair4 connector pin, not a free wall.
+MOUNTING_WALL_ANGLE = {   # degrees, standard math convention
+    'L00': 120.0,   # NW edge
+    'L01': 120.0,   # v103: NW edge — same surface direction as L00,
+                     # confirmed L01 genuinely has an open-air NW wall
+                     # too (60° NE is its only other free option; East
+                     # and SE are seams, one already used by Pair1)
+    'L02': 180.0,   # west edge
+    'L04': 180.0,   # west edge
+    'L06': 180.0,   # west edge — its most-radially-outward option (SW,
+                     # 240°) is 0.3mm too thin for a 20mm hole at 30mm
+                     # depth; west has 1.3mm of real margin instead
+}
+MOUNTING_HOLES = [   # (tag, diameter_mm, depth_mm)
+    ('L00', 4.0, 30.0),    # was 10.0
+    ('L01', 16.0, 30.0),   # v103: new, 4.3mm fit margin
+    ('L02', 3.0, 30.0),    # was 10.0
+    ('L04', 13.0, 30.0),   # was 20.0
+    ('L06', 13.0, 30.0),   # was 20.0
+]
 
 blend_path = bpy.data.filepath
 export_dir = os.path.dirname(blend_path) if blend_path else os.path.expanduser("~")
@@ -327,6 +368,42 @@ def make_hole_cutter_y(name, hole_x, y0, y1, hole_z, radius):
     bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
     bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
     obj.location=Vector((hole_x,centre_y,hole_z))
+    return obj
+
+def make_hole_cutter_dir(name, entry_x, entry_y, hole_z, angle_deg, depth, radius):
+    """v101: general-direction horizontal hole cutter, bored along an
+    arbitrary angle in the XY plane (standard math convention, degrees)
+    instead of being restricted to pure X (make_hole_cutter) or pure Y
+    (make_hole_cutter_y). Needed for mounting holes on tiles whose
+    natural exterior wall isn't axis-aligned (e.g. L00's NW wall).
+    angle_deg is the wall's OUTWARD normal direction; the cutter bores
+    INWARD (the opposite direction) by `depth` mm from the entry
+    point, with a small overshoot poking outward past the entry into
+    open air. (First draft of this function had that backwards —
+    bored further outward instead of into the material, which is why
+    the height-fit check below failed until this was caught.)"""
+    angle = math.radians(angle_deg)
+    dx, dy = math.cos(angle), math.sin(angle)        # outward (wall normal)
+    idx, idy = -dx, -dy                              # inward (bore direction)
+    overshoot = 2.0
+    total_len = depth + overshoot
+    half = total_len/2.0
+    mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new(); segs=64; bv,tv=[],[]
+    for i in range(segs):
+        a=2*math.pi*i/segs
+        y_off=radius*math.cos(a); z_off=radius*math.sin(a)
+        bv.append(bm.verts.new((-half,y_off,z_off))); tv.append(bm.verts.new((half,y_off,z_off)))
+    for i in range(segs):
+        j=(i+1)%segs; bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    offset = (depth-overshoot)/2.0   # along the INWARD direction: places
+                                       # local x=-half at entry+overshoot*outward,
+                                       # local x=+half at entry+depth*inward
+    obj.location = Vector((entry_x+idx*offset, entry_y+idy*offset, hole_z))
+    obj.rotation_euler = (0,0,angle+math.pi)   # point local +X inward
     return obj
 
 def make_wire_hole_cutter(name, cx, cy):
@@ -902,6 +979,39 @@ def add_r00_cable_port(right_obj):
              right_obj, cutter, primary='FLOAT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
+def add_mounting_hole(obj, tag, cx, cy, diameter, depth):
+    """v101: bores a straight hole through a tile's own natural
+    exterior wall (direction from MOUNTING_WALL_ANGLE, which varies
+    per tile), entering at that wall's midpoint and going `depth` mm
+    into the material. Z is centered on half the MINIMUM available
+    wall height sampled along the whole bore path — same principle as
+    the R00 cable port — so it stays inside material along its full
+    length even on tiles where the dome height changes as you go in."""
+    angle_deg = MOUNTING_WALL_ANGLE[tag]
+    angle = math.radians(angle_deg)
+    dx, dy = math.cos(angle), math.sin(angle)     # outward (wall normal)
+    idx, idy = -dx, -dy                            # inward (actual bore direction)
+    apothem = cos30 * S
+    entry_x = cx + apothem*dx
+    entry_y = cy + apothem*dy
+    radius = diameter/2.0
+
+    samples = 20
+    heights = [PLATE_H + dome_z(entry_x+idx*depth*i/(samples-1), entry_y+idy*depth*i/(samples-1))
+               for i in range(samples)]
+    min_h = min(heights)
+    hole_z = min_h / 2.0
+    print(f"  {tag} mounting hole: wall normal={angle_deg:.0f}°, "
+          f"entry=({entry_x:.1f},{entry_y:.1f}), path height {min_h:.1f}..{max(heights):.1f}mm, "
+          f"z={hole_z:.1f}mm")
+
+    cutter = make_hole_cutter_dir(f"MountHole_{tag}", entry_x, entry_y, hole_z,
+                                    angle_deg, depth, radius)
+    apply_transforms(cutter)
+    safe_cut(f"{tag} mounting hole ({diameter:.0f}mm dia, {depth:.0f}mm deep)",
+             obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
 # ============================================================
 # BUILD SEQUENCE
 # ============================================================
@@ -937,6 +1047,12 @@ for i,(cx,cy) in enumerate(right_grid):
     apply_tile_cuts(right_obj,tag,'R',i,cx,cy)
     add_tile_label(tag,cx,cy); add_bottom_label(tag,cx,cy)
     add_bottom_engraving(right_obj,tag,cx,cy)
+
+print("\nStep 4c: Mounting holes for external device attachment...")
+for tag, dia, depth in MOUNTING_HOLES:
+    idx = int(tag[1:])
+    cx, cy = left_grid[idx]
+    add_mounting_hole(left_obj, tag, cx, cy, dia, depth)
 
 print("\nStep 5: Teensy cavity (FLOAT, deep into dome structure)...")
 apply_cavity(right_obj)
