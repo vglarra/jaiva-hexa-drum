@@ -42,7 +42,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V106 - 30 REAR COVER ATTACHMENT HOLES ===")
+print("=== HEX DOME ARRAY V108 - BRONZE INSERT PILOT HOLES ADDED ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -1055,25 +1055,36 @@ def add_rear_hole(obj, label, x, y, diameter, depth):
 # the cavity, leaving very little solid bottom material there at all.
 # This is a STARTING list — edit x/y directly to taste; label format
 # is "<tile><index>".
-REAR_HOLE_DIA   = 13.0
+REAR_HOLE_DIA   = 13.0   # v107: synced to user's manual edit, was 10.0
 REAR_HOLE_DEPTH = 4.0
-REAR_MOUNT_HOLES = [   # (label, x, y)
+# v108: bronze threaded-insert pilot hole, concentric with each rear
+# mounting hole above. Deliberately NOT a separate coordinate list —
+# this reads REAR_MOUNT_HOLES directly, so moving any hole there
+# moves its insert pilot automatically too.
+INSERT_HOLE_DIA   = 4.0
+INSERT_HOLE_DEPTH = 10.0
+REAR_MOUNT_HOLES = [   # (label, x, y) — v107: synced to user's manual edit.
+                       # Checked against every canal/junction/wire-hole/
+                       # pin/cavity/cable-port coordinate; only R03b sits
+                       # right at (just past) R03's own hex edge — still
+                       # solid material (same piece as R04), not near any
+                       # actual obstacle, just not really "in R03" anymore.
     ('L00a', -132.5,  85.0), ('L00b', -110.5, 120.0),
     ('L01a',  -15.5,  85.0), ('L01b',  -35.5, 120.0),
     ('L02a', -171.0,  18.3), ('L02b', -171.0,  48.3),
-    ('L03a', -104.0,  18.3), ('L03b', -60.0,  33.3),
+    ('L03a', -104.0,  18.3), ('L03b',  -60.0,  33.3),
     ('L04a', -132.5, -48.3), ('L04b', -132.5, -18.3),
     ('L05a',  -55.5, -19.3), ('L05b',  -18.5, -33.3),
-    ('L06a', -99.0,-115.0), ('L06b', -58.0,-100.0),
-    ('R00a',   36.5,  125.0), ('R00b',   15.5, 105.0),
-    ('R01a',   135.5,  89.0), ('R01b',   115.5, 125.0),
+    ('L06a',  -99.0,-115.0), ('L06b',  -58.0,-100.0),
+    ('R00a',   36.5, 125.0), ('R00b',   15.5, 105.0),
+    ('R01a',  135.5,  89.0), ('R01b',  115.5, 125.0),
     ('R02a',  -14.0,  18.3), ('R02b',  -14.0,  49.3),
-    ('R03a',   95.0,  44.3), ('R03b',   115.0,  25.3),
+    ('R03a',   95.0,  44.3), ('R03b',  115.0,  25.3),
     ('R04a',  167.0,  18.3), ('R04b',  170.0,  53.3),
     # R05: no viable spot — see note above
-    ('R06a',   130.5, -48.3), ('R06b',   95.5, -23.3),
+    ('R06a',  130.5, -48.3), ('R06b',   95.5, -23.3),
     ('R07a',  -20.0,-118.0), ('R07b',  -19.0, -85.0),
-    ('R08a',   50.0,-115.0), ('R08b',   100.0,-110.0),
+    ('R08a',   50.0,-115.0), ('R08b',  100.0,-110.0),
 ]
 
 # ============================================================
@@ -1122,6 +1133,11 @@ print("\nStep 4d: Rear-surface cover/enclosure attachment holes...")
 for label, x, y in REAR_MOUNT_HOLES:
     target = left_obj if label.startswith('L') else right_obj
     add_rear_hole(target, label, x, y, REAR_HOLE_DIA, REAR_HOLE_DEPTH)
+
+print("\nStep 4e: Bronze insert pilot holes (concentric, locked to REAR_MOUNT_HOLES)...")
+for label, x, y in REAR_MOUNT_HOLES:
+    target = left_obj if label.startswith('L') else right_obj
+    add_rear_hole(target, f"{label}_insert", x, y, INSERT_HOLE_DIA, INSERT_HOLE_DEPTH)
 
 print("\nStep 5: Teensy cavity (FLOAT, deep into dome structure)...")
 apply_cavity(right_obj)
