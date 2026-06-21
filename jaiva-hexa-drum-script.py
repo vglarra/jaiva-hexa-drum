@@ -42,7 +42,7 @@ import math
 import os
 from mathutils import Vector
 
-print("=== HEX DOME ARRAY V103 - L01 MOUNTING HOLE ADDED ===")
+print("=== HEX DOME ARRAY V106 - 30 REAR COVER ATTACHMENT HOLES ===")
 
 # ---- Parameters ------------------------------------------------------
 SENSOR_DIA     = 69.0
@@ -126,11 +126,11 @@ MOUNTING_WALL_ANGLE = {   # degrees, standard math convention
                      # depth; west has 1.3mm of real margin instead
 }
 MOUNTING_HOLES = [   # (tag, diameter_mm, depth_mm)
-    ('L00', 4.0, 30.0),    # was 10.0
-    ('L01', 16.0, 30.0),   # v103: new, 4.3mm fit margin
-    ('L02', 3.0, 30.0),    # was 10.0
-    ('L04', 13.0, 30.0),   # was 20.0
-    ('L06', 13.0, 30.0),   # was 20.0
+    ('L00', 4.0, 30.0),    # v104: synced to user's manual edit
+    ('L01', 16.0, 30.0),
+    ('L02', 3.0, 30.0),    # v104: synced to user's manual edit
+    ('L04', 13.0, 30.0),   # v104: synced to user's manual edit
+    ('L06', 13.0, 30.0),   # v104: synced to user's manual edit
 ]
 
 blend_path = bpy.data.filepath
@@ -1012,6 +1012,70 @@ def add_mounting_hole(obj, tag, cx, cy, diameter, depth):
              obj, cutter, primary='EXACT')
     bpy.data.objects.remove(cutter, do_unlink=True)
 
+def make_rear_hole_cutter(name, x, y, diameter, depth):
+    """v106: vertical blind hole cut into the bottom (z=0) face, for
+    attaching a future cover/enclosure with a pin. Same style as
+    make_fillet_cutter, but with an explicit depth instead of being
+    locked to CANAL_DEPTH, since these are deliberately deeper (4mm
+    here vs. the canals' 3mm)."""
+    radius = diameter/2.0
+    mesh=bpy.data.meshes.new(name+"_mesh"); obj=bpy.data.objects.new(name,mesh)
+    bpy.context.collection.objects.link(obj)
+    bm=bmesh.new(); segs=32
+    z0,z1=-0.1, depth+0.1
+    bv,tv=[],[]
+    for i in range(segs):
+        a=2*math.pi*i/segs
+        xo=radius*math.cos(a); yo=radius*math.sin(a)
+        bv.append(bm.verts.new((xo,yo,z0))); tv.append(bm.verts.new((xo,yo,z1)))
+    for i in range(segs):
+        j=(i+1)%segs; bm.faces.new([bv[i],bv[j],tv[j],tv[i]])
+    bm.faces.new(list(reversed(bv))); bm.faces.new(tv)
+    bm.normal_update(); bm.to_mesh(mesh); bm.free(); mesh.validate()
+    obj.location = Vector((x,y,0.0))
+    return obj
+
+def add_rear_hole(obj, label, x, y, diameter, depth):
+    """v106: cuts one REAR_MOUNT_HOLES entry into the given object."""
+    cutter = make_rear_hole_cutter(f"RearHole_{label}", x, y, diameter, depth)
+    apply_transforms(cutter)
+    safe_cut(f"rear hole {label} ({diameter:.0f}mm dia, {depth:.0f}mm deep)",
+             obj, cutter, primary='EXACT')
+    bpy.data.objects.remove(cutter, do_unlink=True)
+
+# v106: 29-30 cover/enclosure attachment holes on the rear (bottom)
+# face, drilled into z=0, 10mm diameter x 4mm deep. Positions found
+# algorithmically — sampled a grid across each tile's footprint and
+# kept points clear of: the wire hole, every canal segment, every
+# canal junction circle, the Teensy cavity, every pin face, and the
+# R00 cable port path, each with a real clearance margin (not just
+# "doesn't touch"). R05 came up with ZERO viable spots at any
+# reasonable margin — its center column is bisected by canal, its
+# west wall carries the Pair3 pin, and most of its footprint overlaps
+# the cavity, leaving very little solid bottom material there at all.
+# This is a STARTING list — edit x/y directly to taste; label format
+# is "<tile><index>".
+REAR_HOLE_DIA   = 13.0
+REAR_HOLE_DEPTH = 4.0
+REAR_MOUNT_HOLES = [   # (label, x, y)
+    ('L00a', -132.5,  85.0), ('L00b', -110.5, 120.0),
+    ('L01a',  -15.5,  85.0), ('L01b',  -35.5, 120.0),
+    ('L02a', -171.0,  18.3), ('L02b', -171.0,  48.3),
+    ('L03a', -104.0,  18.3), ('L03b', -60.0,  33.3),
+    ('L04a', -132.5, -48.3), ('L04b', -132.5, -18.3),
+    ('L05a',  -55.5, -19.3), ('L05b',  -18.5, -33.3),
+    ('L06a', -99.0,-115.0), ('L06b', -58.0,-100.0),
+    ('R00a',   36.5,  125.0), ('R00b',   15.5, 105.0),
+    ('R01a',   135.5,  89.0), ('R01b',   115.5, 125.0),
+    ('R02a',  -14.0,  18.3), ('R02b',  -14.0,  49.3),
+    ('R03a',   95.0,  44.3), ('R03b',   115.0,  25.3),
+    ('R04a',  167.0,  18.3), ('R04b',  170.0,  53.3),
+    # R05: no viable spot — see note above
+    ('R06a',   130.5, -48.3), ('R06b',   95.5, -23.3),
+    ('R07a',  -20.0,-118.0), ('R07b',  -19.0, -85.0),
+    ('R08a',   50.0,-115.0), ('R08b',   100.0,-110.0),
+]
+
 # ============================================================
 # BUILD SEQUENCE
 # ============================================================
@@ -1053,6 +1117,11 @@ for tag, dia, depth in MOUNTING_HOLES:
     idx = int(tag[1:])
     cx, cy = left_grid[idx]
     add_mounting_hole(left_obj, tag, cx, cy, dia, depth)
+
+print("\nStep 4d: Rear-surface cover/enclosure attachment holes...")
+for label, x, y in REAR_MOUNT_HOLES:
+    target = left_obj if label.startswith('L') else right_obj
+    add_rear_hole(target, label, x, y, REAR_HOLE_DIA, REAR_HOLE_DEPTH)
 
 print("\nStep 5: Teensy cavity (FLOAT, deep into dome structure)...")
 apply_cavity(right_obj)
